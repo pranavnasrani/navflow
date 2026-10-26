@@ -12,6 +12,7 @@ solver/import_results.py). There is no live solving at run time.
 
 import argparse
 import sys
+import zipfile
 from pathlib import Path
 
 # Add project root to sys.path
@@ -41,7 +42,7 @@ def _check_caches(cache_dir: Path, obj_ids: list[str]) -> None:
         else:
             try:
                 read_cache(path)
-            except (ValueError, OSError, KeyError) as exc:  # v1 caches raise ValueError
+            except (ValueError, OSError, KeyError, EOFError, zipfile.BadZipFile) as exc:  # v1 caches raise ValueError
                 problem = str(exc)
         if problem:
             print(f"\n[!] {problem}\n[!] {CACHE_HELP}", file=sys.stderr)

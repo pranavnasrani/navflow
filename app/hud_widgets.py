@@ -127,6 +127,54 @@ def particles_on_lines(
     return ((1.0 - t) * p0 + t * p1).reshape(-1, 3)
 
 
+def wind_arrow_geometry(
+    wind_vector: np.ndarray, centre: np.ndarray, bounds: np.ndarray, length_frac: float = 0.2
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """(start, unit direction, length) of the wind arrow: it sits on the upstream edge and points downstream.
+
+    Walk from `centre` BACK against the wind, P = C - s d (d = unit wind vector), until the ray leaves the
+    display box. Each axis gives its own s_i, the distance to the face the ray reaches first divided by
+    the component of d on that axis (a rate-of-change / similar-triangles calculation):
+        d_i > 0: the upstream face is the low face, s_i = (C_i - lo_i) / d_i
+        d_i < 0: the upstream face is the high face, s_i = (hi_i - C_i) / (-d_i)
+    s is the smallest s_i. The arrow starts at 0.97 s (just inside the face), is `length_frac` of the longest
+    box side long, and is shortened if there is less room than that upstream of the centre.
+    """
+    d = np.asarray(wind_vector, dtype=float)
+    n = float(np.linalg.norm(d))
+    d = d / n if n > 0.0 else np.array([1.0, 0.0, 0.0])
+    b = np.asarray(bounds, dtype=float)
+    lo, hi = b[0::2], b[1::2]
+    c = np.clip(np.asarray(centre, dtype=float), lo, hi)
+    s = np.inf
+    for i in range(3):
+        if d[i] > 1e-9:
+            s = min(s, (c[i] - lo[i]) / d[i])
+        elif d[i] < -1e-9:
+            s = min(s, (hi[i] - c[i]) / -d[i])
+    if not np.isfinite(s):
+        s = 0.0
+    length = min(length_frac * float((hi - lo).max()), max(0.97 * s, 1e-6))
+    return c - 0.97 * s * d, d, float(length)
+
+
+def wand_rod_endpoints(lines: np.ndarray, z: float, bounds: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """End points of the smoke-wand rod: the two extreme seeds (first point of every streamline).
+
+    With no streamlines the rod falls back to a line across y at height z near the upstream end of the box.
+    """
+    pts = np.asarray(lines, dtype=float).reshape(-1, 3)
+    valid = np.isfinite(pts).all(axis=1)
+    prev_nan = np.concatenate([[True], ~valid[:-1]]) if len(valid) else valid
+    seeds = pts[valid & prev_nan]
+    b = np.asarray(bounds, dtype=float)
+    if len(seeds) >= 2:
+        axis = int(np.argmax(seeds.max(axis=0) - seeds.min(axis=0)))  # the rake runs along its longest axis
+        return seeds[np.argmin(seeds[:, axis])], seeds[np.argmax(seeds[:, axis])]
+    x = b[0] + 0.05 * (b[1] - b[0])
+    return np.array([x, b[2], z]), np.array([x, b[3], z])
+
+
 # --------------------------------------------------------------------------------------------------
 # Log bars
 # --------------------------------------------------------------------------------------------------
@@ -284,7 +332,7 @@ class SustainabilityOverlay(QFrame):
         if "fuel" in self.widgets:
             self.fuel_big = self._label(lay, "", "font-size: 22px; font-weight: 800; color: #5CF2B0;")
             self.co2_big = self._label(lay, "", "font-size: 18px; font-weight: 800; color: #B9F6CA;")
-            self.fuel_note = self._label(lay, "", f"font-size: 11px; color: {MUTED};")
+            self.fuel_note = self._label(lay, "", f"font-size: 11px; color: {MUTED};", wrap=True)
         if "speed" in self.widgets:
             self.speed_big = self._label(lay, "", "font-size: 22px; font-weight: 800; color: #FFD740;")
             self.speed_note = self._label(lay, "", f"font-size: 11px; color: {MUTED};")
@@ -306,6 +354,11 @@ class SustainabilityOverlay(QFrame):
         self.sdg_label.setText(self._sdg_text())
 
         self.setVisible(bool(self.widgets))
+
+    def fit(self, width: int) -> None:
+        """Set the width and the height that matches it (wrapped text needs the height for that width)."""
+        self.setFixedWidth(width)
+        self.setFixedHeight(max(self.layout().totalHeightForWidth(width), self.layout().totalMinimumSize().height()))
 
     def _label(self, lay, text: str, style: str, wrap: bool = False) -> QLabel:
         lb = QLabel(text)
@@ -377,10 +430,21 @@ class SustainabilityOverlay(QFrame):
 _SUPERSCRIPT = str.maketrans("-0123456789", "⁻⁰¹²³⁴⁵⁶⁷⁸⁹")
 
 
-def colorbar_ticks(lo: float, hi: float, log: bool) -> list[tuple[float, str]]:
+def compact_si(v: float) -> str:
+    """Short number text: -3540 -> '-3.5k', 52.4 -> '52.4', 1.85e6 -> '1.9M', 0.0123 -> '0.012'."""
+    if v == 0.0 or not math.isfinite(v):
+        return "0" if v == 0.0 else str(v)
+    a = abs(v)
+    for scale, prefix in ((1e9, "G"), (1e6, "M"), (1e3, "k")):
+        if a >= scale:
+            return f"{v / scale:.2g}{prefix}" if abs(v / scale) >= 10 else f"{v / scale:.1f}{prefix}".replace(".0", "")
+    return f"{v:.3g}" if a >= 1 else f"{v:.2g}"
+
+
+def colorbar_ticks(lo: float, hi: float, log: bool, n_linear: int = 5) -> list[tuple[float, str]]:
     """[(position 0..1 along the bar, label)] for a colour bar from lo to hi.
 
-    Linear: five evenly spaced values. Log: one tick per power of ten inside the range (a logarithm turns
+    Linear: `n_linear` (5 or 3) evenly spaced values in compact SI text. Log: one tick per power of ten inside the range (a logarithm turns
     "times 10" into "plus 1", so decades are evenly spaced); fewer than two decades fall back to three.
     """
     if not (hi > lo):
@@ -391,8 +455,9 @@ def colorbar_ticks(lo: float, hi: float, log: bool) -> list[tuple[float, str]]:
         if len(decades) >= 2:
             return [((e - a) / (b - a), "10" + str(e).translate(_SUPERSCRIPT)) for e in decades]
         mids = [lo, math.sqrt(lo * hi), hi]  # geometric middle: halfway on the log scale
-        return [((math.log10(v) - a) / (b - a), f"{v:.2g}") for v in mids]
-    return [(f, f"{lo + f * (hi - lo):.3g}") for f in (0.0, 0.25, 0.5, 0.75, 1.0)]
+        return [((math.log10(v) - a) / (b - a), compact_si(v)) for v in mids]
+    fracs = (0.0, 0.5, 1.0) if n_linear <= 3 else (0.0, 0.25, 0.5, 0.75, 1.0)
+    return [(f, compact_si(lo + f * (hi - lo))) for f in fracs]
 
 
 class ColorBar(QWidget):
@@ -437,7 +502,8 @@ class ColorBar(QWidget):
         f.setPixelSize(12)
         p.setFont(f)
         p.setPen(QColor(TEXT))
-        for frac, text in colorbar_ticks(self.lo, self.hi, self.log):
+        n = 5 if self.width() >= 460 else 3  # fewer labels on a narrow bar so they never touch
+        for frac, text in colorbar_ticks(self.lo, self.hi, self.log, n):
             x = x0 + frac * (x1 - x0)
             p.drawLine(QPointF(x, y0 + h), QPointF(x, y0 + h + 4))
             p.drawText(QRectF(x - 40, y0 + h + 5, 80, 16), Qt.AlignCenter, text)

@@ -37,6 +37,8 @@ from app.hud_widgets import (
     line_runs,
     particles_on_lines,
     polyline_from_nan_joined,
+    wand_rod_endpoints,
+    wind_arrow_geometry,
 )
 from app.input_controller import ExhibitionInputController
 from app.state_manager import ObjectStateManager
@@ -297,6 +299,13 @@ class MonitorWindow(QMainWindow):
             ),
         ]
 
+        # Wind arrow and wand rod: persistent PolyData, updated in place by update_view
+        self._last_lines = None
+        self.arrow_poly = self._wind_arrow(np.array([1.0, 0.0, 0.0]))
+        self.rod_poly = self._wand_rod(np.empty((0, 3)), float(self.state_mgr.wand_heights[0]))
+        pl.add_mesh(self.arrow_poly, color="#FF9100", smooth_shading=True, name="wind_arrow", render=False)
+        pl.add_mesh(self.rod_poly, color="#FFFFFF", smooth_shading=True, name="wand_rod", render=False)
+
         # Flow tracer dots
         self.particles_poly = pv.PolyData(np.zeros((1, 3), dtype=np.float32))
         pl.add_mesh(
@@ -313,48 +322,21 @@ class MonitorWindow(QMainWindow):
         eye = centre + diag * np.array([-0.30, -0.80, 0.40])
         self.plotter.camera_position = [tuple(eye), tuple(centre), (0.0, 0.0, 1.0)]
         self.plotter.reset_camera(bounds=tuple(self.view_bounds))
-        self.plotter.camera.zoom(0.9)  # a little air around the box
+        # a little air around the box; a tall, narrow view (aspect < 1) is limited by its width, so zoom out more
+        aspect = self.plotter.width() / max(self.plotter.height(), 1)
+        self.plotter.camera.zoom(0.9 * min(1.0, aspect))
 
     def _wind_arrow(self, wind_vector: np.ndarray) -> pv.PolyData:
-        """Arrow at the upstream edge of the display box, pointing along the wind.
-
-        Start from the model centre and walk back against the wind until the ray leaves the box:
-        P = C - s d, where d is the unit wind vector and s the smallest positive value that puts one
-        coordinate on a face of the box (s_i = distance to that face / |d_i|).
-        """
-        d = _unit(np.asarray(wind_vector, dtype=float))
+        """Arrow on the upstream edge of the display box, pointing along the wind (geometry: hud_widgets)."""
         v = np.asarray(self.state_mgr.mesh_vertices, dtype=float)
-        c = (v.min(axis=0) + v.max(axis=0)) / 2.0
-        lo, hi = self.view_bounds[0::2], self.view_bounds[1::2]
-        s = np.inf
-        for i in range(3):
-            if abs(d[i]) > 1e-9:
-                face = lo[i] if d[i] > 0 else hi[i]  # walking against the wind: toward the low face if d_i > 0
-                s = min(s, (c[i] - face) / abs(d[i]))
-        length = 0.2 * float(self._box_size.max())
-        if not np.isfinite(s):
-            s = 0.0
-        start = c - 0.97 * s * d
-        # keep the whole arrow inside the box: if the upstream room is shorter than the arrow, shrink it
-        length = min(length, max(0.97 * s, 1e-6))
+        centre = (v.min(axis=0) + v.max(axis=0)) / 2.0
+        start, d, length = wind_arrow_geometry(wind_vector, centre, self.view_bounds)
         return pv.Arrow(start=start, direction=d, scale=length, tip_length=0.35, tip_radius=0.14, shaft_radius=0.05)
 
     def _wand_rod(self, lines: np.ndarray, z: float) -> pv.PolyData:
-        """Thin rod across the wand's seed points (the first point of every streamline)."""
-        pts = np.asarray(lines, dtype=float).reshape(-1, 3)
-        valid = np.isfinite(pts).all(axis=1)
-        prev_nan = np.concatenate([[True], ~valid[:-1]])
-        seeds = pts[valid & prev_nan]
-        b = self.view_bounds
-        if len(seeds) >= 2:
-            ext = seeds.max(axis=0) - seeds.min(axis=0)
-            axis = int(np.argmax(ext))
-            a, e = seeds[np.argmin(seeds[:, axis])], seeds[np.argmax(seeds[:, axis])]
-        else:  # no streamlines: a rod across y at the box's upstream end
-            a = np.array([b[0] + 0.05 * (b[1] - b[0]), b[2], z])
-            e = np.array([b[0] + 0.05 * (b[1] - b[0]), b[3], z])
-        radius = 0.007 * float(self._box_size.max())
-        return pv.Line(a, e).tube(radius=radius)
+        """Thin rod across the wand's seed points."""
+        a, e = wand_rod_endpoints(lines, z, self.view_bounds)
+        return pv.Line(a, e).tube(radius=0.007 * float(self._box_size.max()))
 
     # ------------------------------------------------------------------------------------------
     # Updates
@@ -377,33 +359,33 @@ class MonitorWindow(QMainWindow):
             self.mesh_actor.mapper.scalar_range = (float(lo), float(hi))
             self.pressure_bar.set_range(float(lo), float(hi))
 
-        # 2. Streamlines, clipped to the display box. Dominant term -> a fixed colour per term.
-        dom = np.asarray(state["dominant"])
-        palette = np.array([hex_to_rgb(TERM_COLORS[n]) for n in TERM_NAMES] + [(255, 255, 255)], dtype=np.uint8)
-        rgb = palette[np.where(dom >= 0, dom, 3)] if len(dom) else np.zeros((0, 3), dtype=np.uint8)
-        poly = polyline_from_nan_joined(
-            state["lines"], {"k": state["k"], "dominant_rgb": rgb}, bounds=self.view_bounds
-        )
-        self.lines_poly.copy_from(poly)
-        self._line_points = np.asarray(poly.points, dtype=float)
-        self._run_starts, self._run_lengths = line_runs(poly) if poly.n_lines else (np.empty(0, int), np.empty(0, int))
-        if poly.n_points:
-            k = np.asarray(poly.point_data["k"], dtype=float)
-            k = k[np.isfinite(k) & (k > 0)]
-            if k.size:
-                k_lo = max(float(np.percentile(k, 2)), 1e-8)
-                k_hi = max(float(np.percentile(k, 99.5)), k_lo * 10.0)  # log scale needs 0 < lo < hi
-                self.line_actors[2].mapper.scalar_range = (k_lo, k_hi)
-                self.k_bar.set_range(k_lo, k_hi)
+        # 2. Streamlines, k range and the wand rod only change with (wand, nearest direction); the state
+        #    manager hands back the very same array object in that case, so an identity check is enough.
+        if state["lines"] is not self._last_lines:
+            self._last_lines = state["lines"]
+            dom = np.asarray(state["dominant"])
+            palette = np.array([hex_to_rgb(TERM_COLORS[n]) for n in TERM_NAMES] + [(255, 255, 255)], dtype=np.uint8)
+            rgb = palette[np.where(dom >= 0, dom, 3)] if len(dom) else np.zeros((0, 3), dtype=np.uint8)
+            poly = polyline_from_nan_joined(
+                state["lines"], {"k": state["k"], "dominant_rgb": rgb}, bounds=self.view_bounds
+            )
+            self.lines_poly.copy_from(poly)
+            self._line_points = np.asarray(poly.points, dtype=float)
+            self._run_starts, self._run_lengths = (
+                line_runs(poly) if poly.n_lines else (np.empty(0, int), np.empty(0, int))
+            )
+            if poly.n_points:
+                k = np.asarray(poly.point_data["k"], dtype=float)
+                k = k[np.isfinite(k) & (k > 0)]
+                if k.size:
+                    k_lo = max(float(np.percentile(k, 2)), 1e-8)
+                    k_hi = max(float(np.percentile(k, 99.5)), k_lo * 10.0)  # log scale needs 0 < lo < hi
+                    self.line_actors[2].mapper.scalar_range = (k_lo, k_hi)
+                    self.k_bar.set_range(k_lo, k_hi)
+            self.rod_poly.copy_from(self._wand_rod(state["lines"], state["wand_z"]))
 
-        # 3. Wind arrow and the wand rod
-        self.plotter.add_mesh(
-            self._wind_arrow(state["wind_vector"]), color="#FF9100", name="wind_arrow", smooth_shading=True
-        )
-        self.plotter.add_mesh(
-            self._wand_rod(state["lines"], state["wand_z"]), color="#FFFFFF",
-            name="wand_rod", smooth_shading=True,
-        )
+        # 3. Wind arrow: same shape every time, so its points are updated in place (no new actor, no render).
+        self.arrow_poly.copy_from(self._wind_arrow(state["wind_vector"]))
 
         # 4. HUD
         n_wand = len(self.state_mgr.wand_heights)
@@ -443,7 +425,7 @@ class MonitorWindow(QMainWindow):
             self.lbl_filled.hide()
 
         self.overlay.set_metrics(metrics)
-        self.overlay.adjustSize()
+        self.overlay.fit(self.overlay.width())
         self.overlay.raise_()
 
         self.plotter.render()
@@ -469,8 +451,7 @@ class MonitorWindow(QMainWindow):
     def _layout_overlays(self) -> None:
         """Place the floating widgets on the 3D view: cards top-left, colour bar / legend bottom-centre."""
         pw, ph = self.plotter.width(), self.plotter.height()
-        self.overlay.setFixedWidth(int(min(400, max(340, 0.62 * pw))))
-        self.overlay.adjustSize()
+        self.overlay.fit(int(min(400, max(340, 0.62 * pw))))
         self.overlay.move(14, 14)
         self.overlay.raise_()
         bar_w = int(min(560, max(280, 0.6 * pw)))

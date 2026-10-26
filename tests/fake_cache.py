@@ -18,15 +18,10 @@ import numpy as np
 import trimesh
 
 from app.cache_format import FORMAT_VERSION, state_key, wand_key, write_cache
+from solver.foam.geometry import rotation_matrix
 
 _N_LINES = 5  # straight lines per wand
 _POINTS_PER_LINE = 6
-
-
-def _rotation_y(deg: float) -> np.ndarray:
-    t = np.radians(deg)
-    c, s = np.cos(t), np.sin(t)
-    return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
 
 
 def write_fake_cache(path: Path, obj_config: dict, n_dir: int = 9, n_wand: int = 10,
@@ -43,6 +38,7 @@ def write_fake_cache(path: Path, obj_config: dict, n_dir: int = 9, n_wand: int =
         )
     directions = np.arange(n_dir) * 2.0
     heights = np.linspace(-1.0, 1.0, n_wand)
+    axis = obj_config.get("cfd", {}).get("rotation_axis", "y")
     has_wind_load = "wind_load" in obj_config.get("cfd", {}).get("widgets", ())
 
     payload: dict = {
@@ -51,7 +47,8 @@ def write_fake_cache(path: Path, obj_config: dict, n_dir: int = 9, n_wand: int =
         "mesh_faces": np.asarray(box.faces, dtype=np.int32),
         "directions_deg": directions,
         "wand_heights": heights,
-        "wind_vectors": np.array([_rotation_y(a).T @ [1.0, 0.0, 0.0] for a in directions]),
+        # Same rule as the importer: wind in the model frame is R^T [1, 0, 0], R = rotation about the object's own axis.
+        "wind_vectors": np.array([rotation_matrix(axis, a).T @ [1.0, 0.0, 0.0] for a in directions]),
         "view_bounds": np.array([-6.0, 14.0, -4.0, 4.0, -2.0, 2.0]),
         "config_json": json.dumps(obj_config),
     }

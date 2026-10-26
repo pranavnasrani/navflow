@@ -11,10 +11,13 @@ from app.hud_widgets import (
     EQUATION,
     NsTermsPanel,
     SustainabilityOverlay,
+    compact_si,
     line_runs,
     log_bar_value,
     particles_on_lines,
     polyline_from_nan_joined,
+    wand_rod_endpoints,
+    wind_arrow_geometry,
 )
 
 NAN3 = [np.nan] * 3
@@ -141,3 +144,78 @@ def test_colorbar_ticks():
     assert [round(f, 2) for f, _ in dec] == [0.0, 0.25, 0.5, 0.75, 1.0]
     assert len(colorbar_ticks(2.0, 9.0, log=True)) == 3  # under two decades: low, geometric middle, high
     assert colorbar_ticks(1.0, 1.0, log=False) == []
+
+
+BOX = np.array([-6.0, 14.0, -4.0, 4.0, -2.0, 2.0])
+CENTRE = np.array([0.0, 0.0, 0.0])
+
+
+def _rot(axis, deg):
+    from solver.foam.geometry import rotation_matrix
+
+    return rotation_matrix(axis, deg)
+
+
+def _check_arrow(start, d, length, wind):
+    """The arrow is inside the box, points the way the wind blows and sits upstream of the model centre."""
+    lo, hi = BOX[0::2], BOX[1::2]
+    assert np.all(start >= lo - 1e-9) and np.all(start <= hi + 1e-9)
+    tip = start + length * d
+    assert np.all(tip >= lo - 1e-9) and np.all(tip <= hi + 1e-9)
+    assert np.allclose(d, wind / np.linalg.norm(wind))
+    assert float(np.dot(CENTRE - start, d)) > 0.0  # walking along the wind from the start reaches the model
+    assert length > 0.05 * float((hi - lo).max())  # not collapsed
+
+
+def test_wind_arrow_z_rotation_has_negative_y_component():
+    # importer rule: wind in the model frame = R^T [1, 0, 0]; for a z-rotation of 30 deg that is (cos, -sin, 0)
+    wind = _rot("z", 30.0).T @ np.array([1.0, 0.0, 0.0])
+    assert wind[1] < 0
+    start, d, length = wind_arrow_geometry(wind, CENTRE, BOX)
+    _check_arrow(start, d, length, wind)
+    assert start[0] < 0 and start[1] > 0  # upstream is -x and, because the wind blows toward -y, +y
+
+
+def test_wind_arrow_y_rotation_has_vertical_component():
+    wind = _rot("y", 10.0).T @ np.array([1.0, 0.0, 0.0])
+    start, d, length = wind_arrow_geometry(wind, CENTRE, BOX)
+    _check_arrow(start, d, length, wind)
+    assert wind[2] != 0.0
+
+
+def test_wind_arrow_all_sign_combinations_and_edge_cases():
+    for sx in (1, -1):
+        for sy in (1, -1):
+            for sz in (1, -1):
+                wind = np.array([sx * 1.0, sy * 0.4, sz * 0.2])
+                start, d, length = wind_arrow_geometry(wind, np.array([1.0, 0.5, -0.3]), BOX)
+                assert length > 0.1 and np.allclose(np.linalg.norm(d), 1.0)
+                assert np.all(start >= BOX[0::2] - 1e-9) and np.all(start <= BOX[1::2] + 1e-9)
+    # a zero vector falls back to +x instead of dividing by zero
+    _, d, _ = wind_arrow_geometry(np.zeros(3), CENTRE, BOX)
+    assert np.allclose(d, [1, 0, 0])
+
+
+def test_wand_rod_endpoints():
+    lines = np.array([[0, -1, 5], [1, -1, 5], NAN3, [0, 1, 5], [1, 1, 5], NAN3, [0, 0, 5], [1, 0, 5]], dtype=float)
+    a, e = wand_rod_endpoints(lines, 5.0, BOX)
+    assert np.allclose(a, [0, -1, 5]) and np.allclose(e, [0, 1, 5])
+    a, e = wand_rod_endpoints(np.empty((0, 3)), 1.5, BOX)  # no streamlines: across y at the wand height
+    assert a[1] == BOX[2] and e[1] == BOX[3] and a[2] == e[2] == 1.5
+
+
+def test_compact_si_and_narrow_ticks():
+    from app.hud_widgets import colorbar_ticks
+
+    assert compact_si(-3540.0) == "-3.5k" and compact_si(1.85e6) == "1.9M" and compact_si(52.4) == "52.4"
+    assert compact_si(0.0) == "0" and compact_si(2000.0) == "2k"
+    assert len(colorbar_ticks(-3540.0, 3640.0, False, n_linear=3)) == 3
+    labels = [t for _, t in colorbar_ticks(-3540.0, 3640.0, False, n_linear=3)]
+    assert all(len(t) <= 6 for t in labels)
+
+
+def test_overlay_fuel_note_is_wrapped(qapp):
+    fuel = SustainabilityOverlay(("fuel", "speed"), None)
+    assert fuel.fuel_note.wordWrap()
+    fuel.fit(340)
+    assert fuel.height() >= fuel.sizeHint().height() - 1
