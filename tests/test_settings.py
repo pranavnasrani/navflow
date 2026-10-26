@@ -51,7 +51,9 @@ def test_load_settings_meshing_and_object_details():
     assert objs["airplane"].rotation_axis == "y" and objs["f1_car"].rotation_axis == "z"
     assert objs["human"].floor == "slip"
     assert all(o.density_kg_m3 == 1.225 and o.kinematic_viscosity_m2_s == 1.5e-5 for o in objs.values())
-    assert all(o.reference_cd == 1.0 and o.base_rotation_deg == (0.0, 0.0, 0.0) for o in objs.values())
+    assert all(o.base_rotation_deg == (0.0, 0.0, 0.0) for o in objs.values())
+    assert all(not hasattr(o, "reference_cd") for o in objs.values())
+    assert all("reference_cd" not in o["cfd"] for o in raw["objects"])
     assert objs["airplane"].direction_label == "Angle of attack"
     assert "info_card" in next(o for o in raw["objects"] if o["id"] == "building")
     assert raw["controls"]["remote_port"] == 8765 and raw["controls"]["knob_step"] == 0.03125

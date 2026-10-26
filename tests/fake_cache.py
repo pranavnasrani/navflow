@@ -65,7 +65,9 @@ def write_fake_cache(path: Path, obj_config: dict, n_dir: int = 9, n_wand: int =
             "drag_coefficient_cd": 0.3 + 0.01 * d, "lift_coefficient_cl": -0.1,
             "frontal_area_m2": 2.0, "drag_power_kw": 4.0 + d, "base_moment_nm": 50.0,
             "iterations": 300, "converged": True, "filled_from": 2 if d == 3 else None,
+            "eval_speed_m_s": 40.0, "eval_drag_power_kw": 4.0 + d, "fuel_burn_l_per_hr": 1.12 * (4.0 + d),
             "fuel_saved_l_per_hr": 1.0, "co2_saved_kg_per_hr": 2.5, "speed_gain_pct": 10.0,
+            "reference_direction_deg": float(directions[n_dir - 1]),  # same for every direction: the worst angle
         }
         if has_wind_load:
             metrics["wind_load"] = [{"label": f"Breeze d{d}", "v_m_s": 3.33, "force_n": float(d), "moment_nm": 2.0}]

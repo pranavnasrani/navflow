@@ -331,11 +331,12 @@ class SustainabilityOverlay(QFrame):
 
         if "fuel" in self.widgets:
             self.fuel_big = self._label(lay, "", "font-size: 22px; font-weight: 800; color: #5CF2B0;")
+            self.saved_big = self._label(lay, "", "font-size: 18px; font-weight: 800; color: #5CF2B0;", wrap=True)
             self.co2_big = self._label(lay, "", "font-size: 18px; font-weight: 800; color: #B9F6CA;")
             self.fuel_note = self._label(lay, "", f"font-size: 11px; color: {MUTED};", wrap=True)
         if "speed" in self.widgets:
-            self.speed_big = self._label(lay, "", "font-size: 22px; font-weight: 800; color: #FFD740;")
-            self.speed_note = self._label(lay, "", f"font-size: 11px; color: {MUTED};")
+            self.speed_big = self._label(lay, "", "font-size: 18px; font-weight: 800; color: #FFD740;", wrap=True)
+            self.speed_note = self._label(lay, "", f"font-size: 11px; color: {MUTED};", wrap=True)
         if "wind_load" in self.widgets:
             self._label(lay, "WIND LOAD ON THE TOWER", "font-size: 13px; font-weight: 800; color: #FFC400;")
             grid = QGridLayout()
@@ -384,16 +385,36 @@ class SustainabilityOverlay(QFrame):
 
     def set_metrics(self, metrics: dict) -> None:
         if "fuel" in self.widgets:
-            fuel, co2 = _num(metrics, "fuel_saved_l_per_hr"), _num(metrics, "co2_saved_kg_per_hr")
-            self.fuel_big.setText(f"Fuel saved: {fuel:,.1f} L/h")
-            self.co2_big.setText(f"CO₂ saved: {co2:,.1f} kg/h")
-            self.fuel_note.setText("at cruise, against a reference shape of the same frontal area")
+            self._set_fuel(metrics)
         if "speed" in self.widgets:
             gain = _num(metrics, "speed_gain_pct")
-            self.speed_big.setText(f"Top-speed gain: {gain:+.1f} %")
-            self.speed_note.setText("same power: P = ½ρCdAV³, so V ∝ Cd^(−1/3), a cube root")
+            self.speed_big.setText(f"Top-speed gain vs worst angle: {gain:+.1f} %")
+            self.speed_note.setText("same power: P = ½ρCdAV³, so V ∝ (CdA)^(−1/3), a cube root")
         if "wind_load" in self.widgets:
             self._set_wind_load(metrics)
+
+    def _set_fuel(self, metrics: dict) -> None:
+        """Fuel card: burned, saved against the object's own worst simulated angle, CO2 saved.
+
+        0606 link: saved = (P_worst - P) x litres per kWh, a difference of two cubic power laws, so it is
+        zero at the worst angle itself. The reference angle is the same for every state of an object, so
+        linear interpolation between knob positions leaves it unchanged.
+        """
+        burn = _num(metrics, "fuel_burn_l_per_hr")
+        saved, co2 = _num(metrics, "fuel_saved_l_per_hr"), _num(metrics, "co2_saved_kg_per_hr")
+        self.fuel_big.setText(f"Fuel burned: {burn:,.1f} L/h")
+        ref = metrics.get("reference_direction_deg")
+        has_ref = isinstance(ref, (int, float)) and not isinstance(ref, bool)
+        if has_ref and abs(_num(metrics, "direction_deg") - float(ref)) < 1e-6:
+            self.saved_big.setText("This is the worst angle tested")
+            self.co2_big.setText("")
+        else:
+            where = f" ({float(ref):g}°)" if has_ref else ""
+            self.saved_big.setText(f"Saved vs worst angle{where}: {saved:,.1f} L/h")
+            self.co2_big.setText(f"CO₂ saved: {co2:,.1f} kg/h")
+        eval_v = _num(metrics, "eval_speed_m_s")
+        at_cruise = eval_v > 0.0 and abs(eval_v - _num(metrics, "wind_speed_m_s")) > 1e-6
+        self.fuel_note.setText(f"at cruise (11 km, {eval_v:.0f} m/s)" if at_cruise else "")
 
     def _set_wind_load(self, metrics: dict) -> None:
         rows = metrics.get("wind_load") or []

@@ -63,7 +63,6 @@
         "floor": "none",
         "density_kg_m3": 1.225,
         "kinematic_viscosity_m2_s": 1.5e-05,
-        "reference_cd": 1.0,
         "cruise": {
           "density_kg_m3": 0.364,
           "speed_m_s": 250.0
@@ -110,7 +109,6 @@
         "floor": "moving",
         "density_kg_m3": 1.225,
         "kinematic_viscosity_m2_s": 1.5e-05,
-        "reference_cd": 1.0,
         "widgets": [
           "fuel",
           "speed"
@@ -153,7 +151,6 @@
         "floor": "rough",
         "density_kg_m3": 1.225,
         "kinematic_viscosity_m2_s": 1.5e-05,
-        "reference_cd": 1.0,
         "abl_z0_m": 0.5,
         "widgets": [
           "wind_load"
@@ -197,7 +194,6 @@
         "floor": "slip",
         "density_kg_m3": 1.225,
         "kinematic_viscosity_m2_s": 1.5e-05,
-        "reference_cd": 1.0,
         "widgets": []
       }
     }

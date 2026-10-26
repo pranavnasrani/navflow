@@ -105,14 +105,45 @@ def _wind_load(scale=1.0):
 
 def test_overlay_text(qapp):
     fuel = SustainabilityOverlay(("fuel", "speed"), None)
-    fuel.set_metrics({"fuel_saved_l_per_hr": 123.4, "co2_saved_kg_per_hr": 311.0, "speed_gain_pct": 8.2})
+    fuel.set_metrics({"fuel_burn_l_per_hr": 900.0, "fuel_saved_l_per_hr": 123.4, "co2_saved_kg_per_hr": 311.0,
+                      "speed_gain_pct": 8.2})
     text = fuel.all_text()
     assert "L/h" in text and "SDG 13" in text and "kg/h" in text and "+8.2 %" in text
+    assert "Fuel burned: 900.0 L/h" in text and "Top-speed gain vs worst angle: +8.2 %" in text
 
     tower = SustainabilityOverlay(("wind_load",), None)
     tower.set_metrics({"wind_load": _wind_load(), "direction_deg": 15.0})
     text = tower.all_text()
     assert "Category 5" in text and "SDG 9" in text and "Worst direction so far" in text
+
+
+def _fuel_metrics(direction):
+    return {
+        "direction_deg": direction, "reference_direction_deg": 4.0, "wind_speed_m_s": 102.0, "eval_speed_m_s": 250.0,
+        "fuel_burn_l_per_hr": 900.0, "fuel_saved_l_per_hr": 123.4, "co2_saved_kg_per_hr": 311.0, "speed_gain_pct": 8.2,
+    }
+
+
+def test_overlay_worst_angle_text(qapp):
+    fuel = SustainabilityOverlay(("fuel", "speed"), None)
+    fuel.set_metrics(_fuel_metrics(4.0))  # at the reference angle itself
+    text = fuel.all_text()
+    assert "worst angle tested" in text and "Saved vs worst angle" not in text and "CO₂ saved" not in text
+    fuel.set_metrics(_fuel_metrics(6.0))
+    text = fuel.all_text()
+    assert "Saved vs worst angle (4°): 123.4 L/h" in text and "CO₂ saved: 311.0 kg/h" in text
+    assert "worst angle tested" not in text
+    assert "at cruise (11 km, 250 m/s)" in text
+    fuel.set_metrics(_fuel_metrics(5.0))  # an interpolated knob position between two angles: the normal text
+    assert "Saved vs worst angle" in fuel.all_text()
+
+
+def test_overlay_cruise_note_only_when_evaluated_off_the_simulated_speed(qapp):
+    car = SustainabilityOverlay(("fuel", "speed"), None)
+    m = _fuel_metrics(6.0)
+    m["eval_speed_m_s"] = m["wind_speed_m_s"]
+    car.set_metrics(m)
+    assert "cruise" not in car.all_text()
 
 
 def test_overlay_worst_direction_tracks_the_peak(qapp):

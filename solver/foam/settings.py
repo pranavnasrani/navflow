@@ -54,7 +54,6 @@ class ObjectCfd:
     floor: str  # "none" | "moving" | "rough" | "slip"
     density_kg_m3: float
     kinematic_viscosity_m2_s: float
-    reference_cd: float
     cruise: dict | None  # {"density_kg_m3", "speed_m_s"}
     abl_z0_m: float | None
     widgets: tuple[str, ...]
@@ -89,7 +88,6 @@ def _build_object(obj_id: str, c: dict) -> ObjectCfd:
         floor=floor,
         density_kg_m3=float(c["density_kg_m3"]),
         kinematic_viscosity_m2_s=float(c["kinematic_viscosity_m2_s"]),
-        reference_cd=float(c["reference_cd"]),
         cruise=c.get("cruise"),
         abl_z0_m=None if c.get("abl_z0_m") is None else float(c["abl_z0_m"]),
         widgets=tuple(c.get("widgets", ())),

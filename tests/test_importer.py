@@ -12,7 +12,7 @@ from app.cache_format import FORMAT_VERSION, read_cache, state_key, wand_key, wr
 from solver.foam.geometry import frontal_area, rotation_matrix, run_geometry, wand_heights
 from solver.foam.importer import import_object
 from solver.foam.settings import ObjectCfd, load_settings
-from solver.foam.sustainability import drag_power_kw, fuel_and_co2, speed_gain_pct
+from solver.foam.sustainability import drag_power_kw, fuel_burn_l_per_hr, fuel_and_co2, speed_gain_pct
 from tests.fake_cache import write_fake_cache
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -37,7 +37,7 @@ def make_cfd(**over):
         obj_id="box", speed_m_s=SPEED, real_size_m=4.0, size_axis="x",
         base_rotation_deg=(0.0, 0.0, 0.0), rotation_axis="y", directions_deg=DIRS,
         direction_label="angle", floor="none", density_kg_m3=RHO, kinematic_viscosity_m2_s=1.5e-5,
-        reference_cd=1.0, cruise=None, abl_z0_m=None, widgets=("fuel", "speed"), surface_refinement=None,
+        cruise=None, abl_z0_m=None, widgets=("fuel", "speed"), surface_refinement=None,
     )
     base.update(over)
     return ObjectCfd(**base)
@@ -182,25 +182,70 @@ def test_metrics_values(root, tmp_path):
     assert m["drag_power_kw"] == pytest.approx(100.0 * SPEED / 1000)  # P = F v
     assert m["base_moment_nm"] == pytest.approx(50.0)  # hypot(30, 40)
     assert (m["iterations"], m["converged"], m["filled_from"]) == (300, True, None)
-    ref = drag_power_kw(1.0, area, RHO, SPEED)
-    fuel, co2 = fuel_and_co2(m["drag_power_kw"], ref, 0.28, 2.52)
-    assert m["fuel_saved_l_per_hr"] == pytest.approx(fuel) and m["co2_saved_kg_per_hr"] == pytest.approx(co2)
-    assert m["speed_gain_pct"] == pytest.approx(speed_gain_pct(m["drag_coefficient_cd"], 1.0))
+    # one finished direction: it is its own reference, so nothing is saved against it
+    assert m["eval_drag_power_kw"] == pytest.approx(m["drag_power_kw"])  # no cruise: simulated condition
+    assert m["eval_speed_m_s"] == SPEED
+    assert m["fuel_burn_l_per_hr"] == pytest.approx(m["drag_power_kw"] * 0.28)
+    assert (m["fuel_saved_l_per_hr"], m["co2_saved_kg_per_hr"], m["speed_gain_pct"]) == (0.0, 0.0, 0.0)
+    assert m["reference_direction_deg"] == 40.0
     assert "wind_load" not in m
     assert all(isinstance(v, (int, float, bool, type(None))) for k, v in m.items())
 
 
-def test_cruise_conditions_used_for_fuel(root, tmp_path):
+def test_plane_uses_cruise_condition(root, tmp_path):
     cfd = make_cfd(cruise={"density_kg_m3": 0.364, "speed_m_s": 250.0})
     model0 = make_model0()
     write_fake_result(root, cfd, model0, 4)
     _, out, _, _ = run_import(root, tmp_path, cfd, model0=model0)
     m = json.loads(read_cache(out)["d4_metrics"])
-    cd, area = m["drag_coefficient_cd"], m["frontal_area_m2"]
-    power = drag_power_kw(cd, area, 0.364, 250.0)
-    fuel, co2 = fuel_and_co2(power, drag_power_kw(1.0, area, 0.364, 250.0), 0.28, 2.52)
-    assert m["fuel_saved_l_per_hr"] == pytest.approx(fuel)
-    assert m["co2_saved_kg_per_hr"] == pytest.approx(co2)
+    cda = m["drag_coefficient_cd"] * m["frontal_area_m2"]
+    assert m["eval_drag_power_kw"] == pytest.approx(0.5 * 0.364 * cda * 250.0**3 / 1000.0)
+    assert m["eval_speed_m_s"] == 250.0
+    assert m["fuel_burn_l_per_hr"] == pytest.approx(m["eval_drag_power_kw"] * 0.28)
+    assert m["drag_power_kw"] == pytest.approx(100.0 * SPEED / 1000)  # the simulated value is unchanged
+
+
+def forces_of(fx):
+    return [(i, fx, 5.0, 20.0) for i in range(1, 301)]
+
+
+def test_reference_is_worst_imported_direction(root, tmp_path):
+    """Three finished directions with different drag: the highest-power one is the reference."""
+    cfd, model0 = make_cfd(), make_model0()
+    write_fake_result(root, cfd, model0, 0, forces=forces_of(60.0))
+    write_fake_result(root, cfd, model0, 4, forces=forces_of(150.0))  # the worst
+    write_fake_result(root, cfd, model0, 8, forces=forces_of(100.0))
+    report, out, _, _ = run_import(root, tmp_path, cfd, model0=model0)
+    c = read_cache(out)
+    ms = {d: json.loads(c[f"d{d}_metrics"]) for d in range(9)}
+
+    p = {d: ms[d]["eval_drag_power_kw"] for d in (0, 4, 8)}
+    assert max(p, key=p.get) == 4
+    assert all(m["reference_direction_deg"] == 40.0 for m in ms.values())
+    assert ms[4]["fuel_saved_l_per_hr"] == 0.0 and ms[4]["speed_gain_pct"] == 0.0
+    for d in (0, 8):
+        assert ms[d]["fuel_saved_l_per_hr"] == pytest.approx((p[4] - p[d]) * 0.28)
+        assert ms[d]["co2_saved_kg_per_hr"] == pytest.approx(ms[d]["fuel_saved_l_per_hr"] * 2.52)
+        cda, cda_ref = (m["drag_coefficient_cd"] * m["frontal_area_m2"] for m in (ms[d], ms[4]))
+        assert ms[d]["speed_gain_pct"] == pytest.approx(((cda_ref / cda) ** (1 / 3) - 1) * 100)
+        assert ms[d]["fuel_saved_l_per_hr"] > 0 and ms[d]["speed_gain_pct"] > 0
+    # filled slots take the same formulas on their copied forces and keep their own angle
+    assert report["filled"][3] == 4 and ms[3]["filled_from"] == 4
+    assert ms[3]["direction_deg"] == 30.0 and ms[3]["fuel_saved_l_per_hr"] == 0.0
+    assert ms[1]["filled_from"] == 0 and ms[1]["fuel_saved_l_per_hr"] == pytest.approx(ms[0]["fuel_saved_l_per_hr"])
+
+
+def test_filled_direction_is_never_the_reference(root, tmp_path):
+    """The only filled slot that could look worst copies a finished one; the reference is still a finished angle."""
+    cfd, model0 = make_cfd(), make_model0()
+    write_fake_result(root, cfd, model0, 0, forces=forces_of(150.0))  # the worst, at 0 deg
+    write_fake_result(root, cfd, model0, 8, forces=forces_of(60.0))
+    _, out, _, _ = run_import(root, tmp_path, cfd, model0=model0)
+    c = read_cache(out)
+    refs = {json.loads(c[f"d{d}_metrics"])["reference_direction_deg"] for d in range(9)}
+    assert refs == {0.0}  # not 10.0, 20.0 ... (filled copies of the 0 deg run)
+    m1 = json.loads(c["d1_metrics"])
+    assert m1["filled_from"] == 0 and m1["direction_deg"] == 10.0
 
 
 def test_wind_load_table_for_wind_load_objects(root, tmp_path):

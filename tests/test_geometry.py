@@ -25,7 +25,7 @@ def make_cfd(**over):
         base_rotation_deg=(0.0, 0.0, 0.0), rotation_axis="y",
         directions_deg=(-20, -15, -10, -5, 0, 5, 10, 15, 20), direction_label="angle of attack",
         floor="moving", density_kg_m3=1.225, kinematic_viscosity_m2_s=1.5e-5,
-        reference_cd=0.3, cruise=None, abl_z0_m=None, widgets=(), surface_refinement=None,
+        cruise=None, abl_z0_m=None, widgets=(), surface_refinement=None,
     )
     base.update(over)
     return ObjectCfd(**base)

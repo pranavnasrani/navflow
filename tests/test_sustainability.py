@@ -1,7 +1,7 @@
 """Tests for solver.foam.sustainability: drag power, fuel and CO2 saved, wind-load table."""
 import pytest
 
-from solver.foam.sustainability import drag_power_kw, fuel_and_co2, speed_gain_pct, wind_load_table
+from solver.foam.sustainability import drag_power_kw, fuel_and_co2, fuel_burn_l_per_hr, speed_gain_pct, wind_load_table
 
 
 def test_drag_power_cubic_in_speed():
@@ -9,9 +9,15 @@ def test_drag_power_cubic_in_speed():
     assert drag_power_kw(1.0, 2.0, 1.225, 80) == pytest.approx(8 * 78.4)  # V doubles -> P x 8
 
 
-def test_speed_gain_is_cube_root_of_cd_ratio():
+def test_speed_gain_uses_cda():
+    """Equal power: P ~ (Cd A) v^3, so halving Cd A lets v rise by 2^(1/3) - 1 = 25.99 %."""
     assert speed_gain_pct(0.5, 1.0) == pytest.approx(25.99, abs=0.01)
     assert speed_gain_pct(1.0, 1.0) == pytest.approx(0.0)
+    assert speed_gain_pct(cda=2.0, ref_cda=16.0) == pytest.approx(100.0)  # (16/2)^(1/3) = 2
+
+
+def test_fuel_burn_is_power_times_factor():
+    assert fuel_burn_l_per_hr(100.0, 0.28) == pytest.approx(28.0)
 
 
 def test_fuel_and_co2():

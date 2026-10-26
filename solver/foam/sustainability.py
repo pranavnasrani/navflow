@@ -3,8 +3,11 @@
 Maths link (IGCSE 0606):
   * Drag power P = F v with F = 1/2 rho Cd A v^2, so P = 1/2 rho Cd A v^3: power grows with the
     CUBE of speed (double the speed, eight times the power).
-  * Holding power fixed, a shape with a smaller Cd can go faster: v2/v1 = (Cd1/Cd2)^(1/3).
+  * Holding power fixed, a shape with a smaller Cd*A can go faster. P is proportional to (Cd A) v^3, so
+    equal P means (Cd A)_1 v_1^3 = (Cd A)_2 v_2^3, giving v_2/v_1 = ((Cd A)_1 / (Cd A)_2)^(1/3).
     That is a cube root, i.e. the power 1/3 - an index (surd) calculation.
+  * The comparison shape is the object's own WORST simulated wind direction (its largest drag power),
+    so "saved" is a difference of two powers, (P_worst - P) x fuel per kWh, and is zero at the worst angle.
   * Wind load scales with v^2, so a wind of speed v loads a structure (v / v_sim)^2 times as
     much as the simulated wind: a direct-proportion rule with a squared ratio.
 """
@@ -36,15 +39,23 @@ def fuel_and_co2(
     return fuel, fuel * co2_kg_per_l
 
 
-def speed_gain_pct(cd: float, ref_cd: float) -> float:
-    """Extra top speed at equal power, in percent: ((ref_cd / cd)^(1/3) - 1) x 100.
+def fuel_burn_l_per_hr(power_kw: float, fuel_l_per_kwh: float) -> float:
+    """Fuel burned just to overcome drag: power (kW) x fuel per kWh = litres per hour."""
+    return power_kw * fuel_l_per_kwh
 
-    A drag coefficient that is zero or negative (a noisy or unconverged force) has no meaningful cube
-    root ratio, so it reports 0.0 instead of failing.
+
+def speed_gain_pct(cda: float, ref_cda: float) -> float:
+    """Extra top speed at equal power, in percent: ((ref_cda / cda)^(1/3) - 1) x 100.
+
+    `cda` is the drag coefficient times the frontal area (m^2). At equal power P = 1/2 rho (Cd A) v^3,
+    so v is proportional to (Cd A)^(-1/3): the speed ratio is the cube root of the (Cd A) ratio.
+
+    A Cd A that is zero or negative (a noisy or unconverged force) has no meaningful cube root ratio,
+    so it reports 0.0 instead of failing.
     """
-    if cd <= 0.0 or ref_cd <= 0.0:
+    if cda <= 0.0 or ref_cda <= 0.0:
         return 0.0
-    return ((ref_cd / cd) ** (1.0 / 3.0) - 1.0) * 100.0
+    return ((ref_cda / cda) ** (1.0 / 3.0) - 1.0) * 100.0
 
 
 def wind_load_table(force_n: float, moment_nm: float, v_sim: float) -> list[dict]:

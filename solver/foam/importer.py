@@ -37,7 +37,7 @@ from solver.foam.convergence import load_forces
 from solver.foam.geometry import frontal_area, rotation_matrix, run_geometry, seed_rake, view_bounds, wand_heights
 from solver.foam.ns_terms import ns_term_fields, ns_term_summary
 from solver.foam.settings import FoamSettings, ObjectCfd
-from solver.foam.sustainability import drag_power_kw, fuel_and_co2, speed_gain_pct, wind_load_table
+from solver.foam.sustainability import drag_power_kw, fuel_and_co2, fuel_burn_l_per_hr, speed_gain_pct, wind_load_table
 
 FINISHED = ("done", "flagged")
 FIELD_NAMES = {"instant": ("U", "p", "k"), "mean": ("UMean", "pMean", "kMean")}
@@ -169,14 +169,11 @@ def _metrics(
     cd = float(force[0] / q_a)
     cl = float(force[2] / q_a)
 
-    # Fuel and CO2 are quoted at cruise conditions when the object has them (aircraft at altitude).
+    # Fuel is quoted at cruise conditions when the object has them (aircraft at altitude), otherwise at the
+    # simulated air and speed. P = 1/2 rho (Cd A) v^3, so the same Cd A costs far less power in thin air.
     rho_c = cfd.cruise["density_kg_m3"] if cfd.cruise else rho
     v_c = cfd.cruise["speed_m_s"] if cfd.cruise else v
-    power = drag_power_kw(cd, area, rho_c, v_c)
-    ref_power = drag_power_kw(cfd.reference_cd, area, rho_c, v_c)
-    fuel, co2 = fuel_and_co2(
-        power, ref_power, float(obj_config["fuel_burn_factor_l_per_kwh"]), float(obj_config["co2_kg_per_l_fuel"])
-    )
+    eval_power = drag_power_kw(cd, area, rho_c, v_c)
     base_moment = float(np.hypot(moment[0], moment[1]))  # |(Mx, My)|: overturning moment about the base centre
     metrics = {
         "direction_deg": float(meta["direction_deg"]),
@@ -193,13 +190,39 @@ def _metrics(
         "iterations": int(meta["iterations"]),
         "converged": bool(meta["converged"]),
         "filled_from": None,
-        "fuel_saved_l_per_hr": float(fuel),
-        "co2_saved_kg_per_hr": float(co2),
-        "speed_gain_pct": float(speed_gain_pct(cd, cfd.reference_cd)),
+        "eval_speed_m_s": float(v_c),  # the speed the fuel numbers are worked out at
+        "eval_drag_power_kw": float(eval_power),
+        "fuel_burn_l_per_hr": float(fuel_burn_l_per_hr(eval_power, float(obj_config["fuel_burn_factor_l_per_kwh"]))),
+        # The three "saved" numbers and the reference angle need every finished direction: _apply_reference.
+        "fuel_saved_l_per_hr": 0.0,
+        "co2_saved_kg_per_hr": 0.0,
+        "speed_gain_pct": 0.0,
+        "reference_direction_deg": float(meta["direction_deg"]),
     }
     if "wind_load" in cfd.widgets:
         metrics["wind_load"] = wind_load_table(float(force[0]), base_moment, v)
     return metrics
+
+
+def _apply_reference(metrics: dict, ref: dict, obj_config: dict) -> None:
+    """Fill in the savings of one state against the reference state `ref` (the object's worst angle).
+
+    Maths link (IGCSE 0606): the drag power at the evaluation condition is P = 1/2 rho (Cd A) v^3.
+      * fuel saved   = (P_ref - P) x litres per kWh, never below 0 (a difference of two powers);
+      * CO2 saved    = fuel saved x kg CO2 per litre (direct proportion);
+      * speed gain   = ((Cd A)_ref / (Cd A))^(1/3) - 1, because at equal power v is proportional to (Cd A)^(-1/3).
+    Everything stays a plain float so the state manager can blend it linearly between angles.
+    """
+    fuel, co2 = fuel_and_co2(
+        metrics["eval_drag_power_kw"], ref["eval_drag_power_kw"],
+        float(obj_config["fuel_burn_factor_l_per_kwh"]), float(obj_config["co2_kg_per_l_fuel"]),
+    )
+    cda = metrics["drag_coefficient_cd"] * metrics["frontal_area_m2"]
+    ref_cda = ref["drag_coefficient_cd"] * ref["frontal_area_m2"]
+    metrics["fuel_saved_l_per_hr"] = float(fuel)
+    metrics["co2_saved_kg_per_hr"] = float(co2)
+    metrics["speed_gain_pct"] = float(speed_gain_pct(cda, ref_cda))
+    metrics["reference_direction_deg"] = float(ref["direction_deg"])
 
 
 def _import_direction(
@@ -267,6 +290,13 @@ def import_object(
         idx: _import_direction(idx, result, meta, settings, cfd, model0, obj_config, heights)
         for idx, (result, meta) in sorted(runs.items())
     }
+
+    # The sustainability reference is the object's own worst FINISHED direction (largest drag power). It is only
+    # known once every finished direction has been read, so the savings are filled in as a second pass.
+    ref_idx = max(states, key=lambda j: states[j]["metrics"]["eval_drag_power_kw"])
+    ref_metrics = dict(states[ref_idx]["metrics"])
+    for st in states.values():
+        _apply_reference(st["metrics"], ref_metrics, obj_config)
 
     filled: dict[int, int] = {}
     for idx in range(n_dir):
