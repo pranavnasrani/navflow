@@ -19,7 +19,7 @@ from solver import run_openfoam
 from solver.foam.geometry import prepare_model
 from solver.foam.queue import RunRecord, load_queue, save_queue
 from solver.foam.runner import (EXIT_MARKER, FORCE_SEP, FoamContainer, RunContext, RunnerError,
-                                SubprocessExecutor, check_mesh_log, mesh_cell_count, run_batch, run_one, stop_flag)
+                                SubprocessExecutor, check_mesh_log, mesh_cell_count, mesh_only, run_batch, run_one, stop_flag)
 from solver.foam.settings import load_settings
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -756,6 +756,33 @@ def test_check_mesh_log_hard_errors_fail():
     mixed = F1_CHECKMESH.replace("Failed 1 mesh checks.", " ***Error in face pyramids: 3 faces pyramids are incorrectly oriented\n\nFailed 2 mesh checks.")
     ok, errs = check_mesh_log(mixed)
     assert not ok and errs == ["Error in face pyramids: 3 faces pyramids are incorrectly oriented"]
+
+
+def test_check_mesh_log_quality_pass_needs_a_complete_log():
+    skew_line = " ***Max skewness = 4.23446, 1 highly skew faces detected which may impair the quality of the results\n"
+    unexplained = ("Checking topology...\n    Face vertices FAILED\n" + skew_line + "\nFailed 2 mesh checks.\n\nEnd\n")
+    assert check_mesh_log(unexplained)[0] is False  # 2 failed checks, only 1 *** line
+    fatal = skew_line + "--> FOAM FATAL ERROR:\nsomething broke\n"
+    assert check_mesh_log(fatal)[0] is False  # crashed after the skew line
+    assert check_mesh_log(F1_CHECKMESH.rsplit("Failed 1 mesh checks.", 1)[0])[0] is False  # truncated after it
+    assert check_mesh_log(F1_CHECKMESH.rsplit("End", 1)[0])[0] is False  # no final End line
+    assert check_mesh_log(F1_CHECKMESH + "Floating point exception (core dumped)\n")[0] is False
+    assert check_mesh_log(F1_CHECKMESH)[0] is True
+
+
+def test_old_queue_record_without_mesh_warnings_loads_with_empty_list(tmp_path):
+    p = tmp_path / "queue.json"
+    p.write_text(json.dumps([{"run_id": "airplane_d0", "obj_id": "airplane", "direction_index": 0,
+                              "direction_deg": 0.0, "status": "waiting", "iterations": 0, "converged": False,
+                              "log": "", "machine": "", "cells": 0}]))
+    assert load_queue(p)[0].mesh_warnings == []
+
+
+def test_mesh_only_log_mentions_accepted_quality_warnings(tmp_path, models):
+    ex = FakeExecutor(mesh_log=F1_CHECKMESH)
+    ctx = replace(make_ctx(tmp_path, models, ex), say=lambda m: None)
+    rec = mesh_only(waiting(), ctx)
+    assert rec.status != "failed" and "1 quality warning" in rec.log
 
 
 def test_check_mesh_log_without_ok_or_warnings_fails():

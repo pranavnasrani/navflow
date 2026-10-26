@@ -93,7 +93,11 @@ def check_mesh_log(text: str) -> tuple[bool, list[str]]:
     ok is True if the log says "Mesh OK." (warnings = []), or if it has at least one "***" line and
     every one of them is a quality warning (skewness, non-orthogonality, aspect ratio, ...); the
     warnings are those lines, without the "***". Any other "***" line is a hard error -> (False, those
-    hard-error lines). A log with neither "Mesh OK." nor any "***" line (empty, crashed) is not ok.
+    hard-error lines). The quality-only pass is deliberately strict, because a failed check does not
+    always print a "***" line: the log must also have a "Failed N mesh checks." line with N no larger
+    than the number of "***" lines (so every failed check is accounted for as a warning), must end
+    normally with checkMesh's "End" line, and must contain no FOAM FATAL / Floating point exception.
+    Otherwise (empty, crashed, truncated, or an unexplained failure) it is not ok.
     """
     if "Mesh OK." in text:
         return True, []
@@ -101,7 +105,16 @@ def check_mesh_log(text: str) -> tuple[bool, list[str]]:
     hard = [w for w in stars if HARD_ERROR.search(w) or not QUALITY_WARNING.search(w)]
     if hard:
         return False, hard
-    return bool(stars), stars
+    failed = FAILED_CHECKS.search(text)
+    complete = (failed is not None and int(failed.group(1)) <= len(stars)
+                and CHECKMESH_END.search(text) is not None and CRASH_TEXT.search(text) is None)
+    return bool(stars) and complete, stars
+
+
+FAILED_CHECKS = re.compile(r"^\s*Failed\s+(\d+)\s+mesh\s+checks?\.", re.MULTILINE)
+CHECKMESH_END = re.compile(r"^End\s*$", re.MULTILINE)  # checkMesh's last line when it finished normally
+# Every OpenFOAM log starts with the banner "trapFpe: Floating point exception trapping enabled", not an error.
+CRASH_TEXT = re.compile(r"FOAM FATAL|Floating point exception(?! trapping enabled)")
 
 
 class RunnerError(RuntimeError):
@@ -309,6 +322,8 @@ def mesh_only(rec: RunRecord, ctx: RunContext) -> RunRecord:
     """Write, copy in and mesh a case, then stop. The case stays in the volume to inspect."""
     if _write_and_mesh(rec, ctx):
         rec.log = f"Mesh OK. cells: {rec.cells}" if rec.cells else "Mesh OK."
+        if rec.mesh_warnings:
+            rec.log += f" ({len(rec.mesh_warnings)} quality warning(s) accepted)"
         ctx.say(f"[{rec.run_id}] {rec.log}")
     return rec
 
