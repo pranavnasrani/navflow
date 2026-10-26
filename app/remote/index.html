@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0b1220">
+<title>NavFlow Remote</title>
+<style>
+  :root {
+    --bg: #0b1220; --panel: #131c30; --line: #2a3a5c; --text: #e8eefc; --dim: #93a3c4;
+    --accent: #3ec1ff; --accent-ink: #04202e; --warn: #ffb347;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 18px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+    overscroll-behavior: none; touch-action: manipulation; }
+  main { max-width: 900px; margin: 0 auto; padding: 16px 16px calc(16px + env(safe-area-inset-bottom));
+    display: grid; gap: 16px; }
+  h1 { margin: 0; font-size: 1.1rem; letter-spacing: .04em; color: var(--dim); font-weight: 600;
+    display: flex; justify-content: space-between; align-items: baseline; }
+  #status { font-size: .85rem; color: var(--dim); }
+  #status.bad { color: var(--warn); }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 20px; padding: 18px; }
+  h2 { margin: 0 0 8px; font-size: 1rem; color: var(--dim); font-weight: 600; text-transform: uppercase; letter-spacing: .06em; }
+  .hint { margin: 4px 0 0; color: var(--dim); font-size: .95rem; }
+
+  /* wind-direction dial */
+  #dial-wrap { display: flex; flex-direction: column; align-items: center; }
+  #dial { width: min(78vw, 360px); height: auto; touch-action: none; cursor: grab; display: block; }
+  #dial-readout { font-size: 2rem; font-weight: 700; font-variant-numeric: tabular-nums; margin-top: -8px; }
+
+  /* smoke-wand slider */
+  #wand-row { display: flex; align-items: center; gap: 16px; }
+  #wand-num { min-width: 3.2ch; text-align: center; font-size: 2.4rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+  input[type=range] { -webkit-appearance: none; appearance: none; flex: 1; height: 72px; background: transparent; margin: 0; touch-action: none; }
+  input[type=range]::-webkit-slider-runnable-track { height: 16px; border-radius: 8px; background: var(--line); }
+  input[type=range]::-moz-range-track { height: 16px; border-radius: 8px; background: var(--line); }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 56px; height: 56px; margin-top: -20px;
+    border-radius: 50%; background: var(--accent); border: 4px solid var(--bg); box-shadow: 0 0 0 2px var(--accent); }
+  input[type=range]::-moz-range-thumb { width: 48px; height: 48px; border-radius: 50%; background: var(--accent); border: 4px solid var(--bg); }
+  .ends { display: flex; justify-content: space-between; color: var(--dim); font-size: .85rem; margin: 0 72px 0 0; }
+
+  /* view buttons */
+  #views { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .view { min-height: 84px; border-radius: 16px; border: 2px solid var(--line); background: transparent; color: var(--text);
+    font: inherit; font-weight: 600; padding: 10px 6px; line-height: 1.2; }
+  .view small { display: block; font-weight: 400; color: var(--dim); font-size: .8rem; margin-top: 4px; }
+  .view[aria-pressed=true] { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  .view[aria-pressed=true] small { color: var(--accent-ink); }
+  #seeing { margin: 14px 2px 0; font-size: 1.2rem; min-height: 2.8em; }
+  #seeing b { color: var(--accent); }
+
+  @media (min-width: 800px) and (orientation: landscape) {
+    main { grid-template-columns: 1fr 1fr; align-items: start; }
+    h1, #views-sec { grid-column: 1 / -1; }
+  }
+  @media (prefers-reduced-motion: no-preference) { .view { transition: background .15s, border-color .15s; } }
+</style>
+</head>
+<body>
+<main>
+  <h1><span>NAVFLOW REMOTE</span><span id="status">connecting&hellip;</span></h1>
+
+  <section>
+    <h2>Wind direction</h2>
+    <div id="dial-wrap">
+      <svg id="dial" viewBox="0 0 240 240" role="slider" aria-label="Wind direction" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <path id="track" d="" fill="none" stroke="#2a3a5c" stroke-width="18" stroke-linecap="round"/>
+        <path id="fill" d="" fill="none" stroke="#3ec1ff" stroke-width="18" stroke-linecap="round"/>
+        <circle cx="120" cy="120" r="62" fill="#0b1220" stroke="#2a3a5c" stroke-width="2"/>
+        <g id="needle"><line x1="120" y1="120" x2="120" y2="64" stroke="#e8eefc" stroke-width="6" stroke-linecap="round"/></g>
+        <circle id="handle" r="22" fill="#3ec1ff" stroke="#0b1220" stroke-width="4"/>
+        <circle cx="120" cy="120" r="9" fill="#e8eefc"/>
+      </svg>
+      <div id="dial-readout">0%</div>
+      <p class="hint">Drag round the dial to turn the wind.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>Smoke wand height</h2>
+    <div id="wand-row">
+      <span id="wand-num">5</span>
+      <input id="wand" type="range" min="1" max="10" step="1" value="5" aria-label="Smoke wand height">
+    </div>
+    <div class="ends"><span>1 low</span><span>10 high</span></div>
+  </section>
+
+  <section id="views-sec">
+    <h2>What to show</h2>
+    <div id="views">
+      <button class="view" data-view="0" aria-pressed="false">Pressure<small>how hard the air pushes</small></button>
+      <button class="view" data-view="1" aria-pressed="false">Navier-Stokes<small>the equation's terms</small></button>
+      <button class="view" data-view="2" aria-pressed="false">Turbulence<small>k-&omega; SST swirling</small></button>
+    </div>
+    <p id="seeing"></p>
+  </section>
+</main>
+
+<script>
+"use strict";
+(function () {
+  // What you're seeing, one short line per view (indexes match the controller's view numbers).
+  var SEEING = [
+    "<b>Pressure:</b> where the air pushes hardest on the shape.",
+    "<b>Navier-Stokes:</b> which term of the equation is winning in each part of the flow.",
+    "<b>Turbulence:</b> where the k-ω SST model says the air is swirling and mixing."
+  ];
+  var SEND_INTERVAL_MS = 50;   // at most 20 commands per second per control
+  var POLL_MS = 500;
+  var HOLD_MS = 800;           // after a touch, ignore polled state so the control does not jump back
+
+  // Dial geometry: a 270-degree sweep, 0 at the top, gap at the bottom.
+  // knob = (angle + 135) / 270 is a straight line (IGCSE 0606 linear interpolation).
+  var CX = 120, CY = 120, R = 98, MIN_A = -135, MAX_A = 135;
+
+  var $ = function (id) { return document.getElementById(id); };
+  var dial = $("dial"), wandEl = $("wand"), statusEl = $("status");
+  var knob = 0, dragging = false, wandDragging = false, lastTouch = 0, failures = 0;
+  var wandCount = 10;
+
+  function point(deg, r) {
+    var a = deg * Math.PI / 180;
+    return [CX + r * Math.sin(a), CY - r * Math.cos(a)];
+  }
+  function arc(fromDeg, toDeg) {
+    var p = point(fromDeg, R), q = point(toDeg, R);
+    var large = (toDeg - fromDeg) > 180 ? 1 : 0;
+    return "M" + p[0].toFixed(2) + " " + p[1].toFixed(2) + " A" + R + " " + R + " 0 " + large + " 1 " + q[0].toFixed(2) + " " + q[1].toFixed(2);
+  }
+  function drawDial() {
+    var a = MIN_A + knob * (MAX_A - MIN_A);
+    $("track").setAttribute("d", arc(MIN_A, MAX_A));
+    $("fill").setAttribute("d", knob > 0.002 ? arc(MIN_A, a) : "");
+    var h = point(a, R);
+    $("handle").setAttribute("cx", h[0]); $("handle").setAttribute("cy", h[1]);
+    $("needle").setAttribute("transform", "rotate(" + a.toFixed(1) + " " + CX + " " + CY + ")");
+    var pct = Math.round(knob * 100);
+    $("dial-readout").textContent = pct + "%";
+    dial.setAttribute("aria-valuenow", pct);
+  }
+
+  // Throttled sender: sends the newest value, at most once per SEND_INTERVAL_MS per kind.
+  var senders = {};
+  function send(kind, value) {
+    var s = senders[kind] || (senders[kind] = { last: 0, timer: null, pending: null });
+    s.pending = value;
+    var wait = SEND_INTERVAL_MS - (Date.now() - s.last);
+    if (wait <= 0) { flush(kind); }
+    else if (!s.timer) { s.timer = setTimeout(function () { flush(kind); }, wait); }
+  }
+  function flush(kind) {
+    var s = senders[kind];
+    if (s.timer) { clearTimeout(s.timer); s.timer = null; }
+    if (s.pending === null) return;
+    var value = s.pending; s.pending = null; s.last = Date.now();
+    var ctl = new AbortController();
+    var t = setTimeout(function () { ctl.abort(); }, 2000);
+    fetch("/cmd", { method: "POST", headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ kind: kind, value: value }), signal: ctl.signal })
+      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); setOnline(true); })
+      .catch(function () { setOnline(false); })
+      .then(function () { clearTimeout(t); });
+  }
+
+  function setOnline(ok) {
+    failures = ok ? 0 : failures + 1;
+    if (ok) { statusEl.textContent = "connected"; statusEl.className = ""; }
+    else if (failures >= 2) { statusEl.textContent = "connection lost - retrying"; statusEl.className = "bad"; }
+  }
+
+  // ---- dial: pointer events cover finger, Apple Pencil and mouse ----
+  function knobFromEvent(e) {
+    var rect = dial.getBoundingClientRect();
+    var dx = e.clientX - (rect.left + rect.width / 2);
+    var dy = e.clientY - (rect.top + rect.height / 2);
+    var a = Math.atan2(dx, -dy) * 180 / Math.PI;      // 0 at top, clockwise positive, -180..180
+    if (a > MAX_A) a = MAX_A;                         // in the gap: stick to the nearer end
+    if (a < MIN_A) a = MIN_A;                         // (lower-left -> 0%, lower-right -> 100%)
+    return (a - MIN_A) / (MAX_A - MIN_A);
+  }
+  function dialMove(e) {
+    var k = knobFromEvent(e);
+    // Never jump across the gap in one move (e.g. 100% straight to 0%): stay at the end reached.
+    if (Math.abs(k - knob) > 0.6) k = knob > 0.5 ? 1 : 0;
+    knob = k; drawDial(); send("knob", k);
+  }
+  dial.addEventListener("pointerdown", function (e) {
+    dragging = true; lastTouch = Date.now();
+    try { dial.setPointerCapture(e.pointerId); } catch (_) {}
+    var k = knobFromEvent(e);
+    knob = k; drawDial(); send("knob", k);
+    e.preventDefault();
+  });
+  dial.addEventListener("pointermove", function (e) { if (dragging) { lastTouch = Date.now(); dialMove(e); e.preventDefault(); } });
+  function dialEnd() { if (dragging) { dragging = false; lastTouch = Date.now(); flush("knob"); } }
+  dial.addEventListener("pointerup", dialEnd);
+  dial.addEventListener("pointercancel", dialEnd);
+  dial.addEventListener("lostpointercapture", dialEnd);
+
+  // ---- wand slider (1-10 on screen, 0-9 on the wire) ----
+  function showWand(n) { $("wand-num").textContent = n; }
+  wandEl.addEventListener("input", function () {
+    wandDragging = true; lastTouch = Date.now();
+    var n = parseInt(wandEl.value, 10);
+    showWand(n); send("wand", n - 1);
+  });
+  wandEl.addEventListener("change", function () { wandDragging = false; lastTouch = Date.now(); flush("wand"); });
+  wandEl.addEventListener("pointerup", function () { wandDragging = false; lastTouch = Date.now(); });
+
+  // ---- views ----
+  var viewBtns = Array.prototype.slice.call(document.querySelectorAll(".view"));
+  function showView(v) {
+    viewBtns.forEach(function (b) { b.setAttribute("aria-pressed", String(parseInt(b.dataset.view, 10) === v)); });
+    $("seeing").innerHTML = SEEING[v] || "";
+  }
+  viewBtns.forEach(function (b) {
+    b.addEventListener("click", function () {
+      var v = parseInt(b.dataset.view, 10);
+      lastTouch = Date.now(); showView(v); send("view", v);
+    });
+  });
+
+  // ---- polling: keep the page in step with the macropad and keyboard ----
+  function poll() {
+    var idle = !dragging && !wandDragging && Date.now() - lastTouch > HOLD_MS;
+    var ctl = new AbortController();
+    var t = setTimeout(function () { ctl.abort(); }, 2000);
+    fetch("/state", { cache: "no-store", signal: ctl.signal })
+      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(function (s) {
+        setOnline(true);
+        if (!idle) return;
+        wandCount = s.wand_count || wandCount;
+        wandEl.max = wandCount;
+        wandEl.value = s.wand + 1; showWand(s.wand + 1);
+        knob = Math.min(1, Math.max(0, s.knob)); drawDial();
+        showView(s.view);
+      })
+      .catch(function () { setOnline(false); })
+      .then(function () { clearTimeout(t); setTimeout(poll, POLL_MS); });
+  }
+
+  drawDial(); showView(0); showWand(parseInt(wandEl.value, 10));
+  poll();
+})();
+</script>
+</body>
+</html>
