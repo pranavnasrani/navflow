@@ -30,7 +30,7 @@ This repository contains an interactive, native 4-monitor 3D Computational Fluid
 4. **Zero-Latency Architecture (<1 ms switching)**:
    - Results come from real **OpenFOAM** (simpleFoam, k-omega SST) runs, not from a live solver. Each object is solved for 9 directions; all 10 wand heights per direction are streamlines traced from that one solution.
    - `solver/import_results.py` packs each object into `assets/cache/<object>_states.npz` (cache format v2).
-   - At runtime `app/state_manager.py` loads the cache into RAM. A wand, knob or iPad input updates all 4 screens in **under 1 ms**.
+   - At runtime `app/state_manager.py` loads the cache into RAM. The state lookup (wand, knob or iPad input -> the numbers, pressure and streamlines to draw) takes **under 1 ms**; drawing the frame is separate.
 
 ---
 
@@ -60,7 +60,8 @@ This repository contains an interactive, native 4-monitor 3D Computational Fluid
 ./.venv/bin/python solver/run_openfoam.py test --object airplane --direction-index 0 --iterations 60 --coarse   # pipeline check
 ./.venv/bin/python solver/run_openfoam.py run --objects airplane f1_car building human --preview   # 3 directions, cap 500, runs/preview
 ./.venv/bin/python solver/run_openfoam.py run --objects airplane f1_car building human             # all 9 directions, cap 1000, runs/full
-./.venv/bin/python solver/run_openfoam.py status     # one row per run
+./.venv/bin/python solver/run_openfoam.py run --objects airplane --retry-failed   # failed runs are skipped until reset to waiting
+./.venv/bin/python solver/run_openfoam.py status [--machine mini]   # one row per run (all machines unless --machine)
 ./.venv/bin/python solver/run_openfoam.py stop       # ask the running batch to save and stop
 
 # 3. Import finished runs into the display caches (safe to re-run as more runs finish;
@@ -93,7 +94,7 @@ navflow/
 ├── requirements.txt
 ├── pytest.ini
 ├── config/
-│   └── exhibition_config.json      # openfoam settings, per-object cfd blocks, controls (keys, remote_port, knob_step)
+│   └── exhibition_config.json      # openfoam settings, per-object cfd blocks, controls (remote_port, knob_step)
 ├── assets/
 │   ├── generate_starter_models.py  # Procedural placeholder meshes
 │   ├── models/<id>/model.stl       # Prepared, tunnel-ready models (+ preview.png)
@@ -128,18 +129,18 @@ navflow/
    - The display is a **100% native desktop application** (PySide6 + PyVista / VTK with Metal/OpenGL). Do **NOT** replace it with or convert it into a web app. The iPad page is only a remote control.
 
 2. **Models and directions**:
-   - Models are prepared with `solver/prepare_model.py`, then the model is **rotated and re-meshed for every direction**; the tunnel stays axis-aligned with wind along +x. Per-object speed, real size, direction list, floor type and widgets are in `config/exhibition_config.json`.
+   - Models are prepared with `solver/prepare_model.py` (base rotation, scale and placement are applied once, when it writes `model.stl`; everything that reloads that file uses `geometry.load_prepared`, which does not rotate again). The model is then **rotated and re-meshed for every direction**; the tunnel stays axis-aligned with wind along +x. Per-object speed, real size, direction list, floor type and widgets are in `config/exhibition_config.json`.
    - Air is sea-level for all runs (rho = 1.225 kg/m^3, nu = 1.5e-5 m^2/s). Convergence: stop when drag and lift each change by <0.2% over the last 50 iterations (min 200, cap 1000); a run that hits the cap exports 100-iteration fieldAverage fields and is marked `flagged`.
 
 3. **Cache format v2** (`app/cache_format.py`, `assets/cache/<obj>_states.npz`):
    - One file per object, `format_version = 2`. 9 direction states `d0..d8`, each with surface pressure, Navier-Stokes terms, metrics, and 10 wand streamline sets `d<i>_w<j>_*` (lines, turbulent k, dominant term). The model mesh is stored once in its own frame.
    - v1 caches (keys `z_steps`, `wind_speeds`) are rejected by `read_cache`; `app/main.py` prints the hint and exits 1.
 
-4. **Input handling & keybindings** (defined in `config/exhibition_config.json`, handled by `app/input_controller.py`):
+4. **Input handling & keybindings** (hard-coded in `app/input_controller.py`; only `controls.remote_port` and `controls.knob_step` come from `config/exhibition_config.json`):
    - `1`-`9`, `0`: smoke wand to height 1 to 10.
    - `Up` / `Down` or `W` / `S`: step the wand up/down.
-   - `Right` / `Left` or `+` / `-` (also `D`/`A`) or mouse wheel: turn the wind-direction knob.
-   - `Tab`: cycle view. (`reset_camera_key` / `quit_key` exist in the config but are not wired to anything yet.)
+   - Wind-direction knob, clockwise (next direction): `Right`, `D`, `+`, `=`, `]`. Anticlockwise: `Left`, `A`, `-`, `_`, `[`. The mouse wheel also turns it (one notch = one detent of `knob_step`).
+   - `Tab`: cycle view. There is no key for camera reset or quit.
 
 5. **Linear interpolation (0606)**:
    - The knob maps to a direction by a straight line, d = d_min + knob (d_max - d_min). Between solved directions d1 < d < d2, `app/state_manager.py` computes t = (d - d1)/(d2 - d1) and y = (1 - t) y1 + t y2, blending surface pressure, N-S terms and telemetry live.
