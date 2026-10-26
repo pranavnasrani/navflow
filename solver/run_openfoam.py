@@ -25,8 +25,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from solver.foam.geometry import prepare_model
 from solver.foam.queue import build_queue, load_queue
-from solver.foam.runner import (Executor, FoamContainer, RunContext, SubprocessExecutor, mesh_only,
-                                run_batch, run_one, stop_flag)
+from solver.foam.runner import (Executor, FoamContainer, RunContext, RunnerError, SubprocessExecutor,
+                                mesh_only, run_batch, run_one, stop_flag)
 from solver.foam.settings import load_settings
 
 DOCKER_DOWN = "Docker Desktop isn't running — open it and try again."
@@ -139,7 +139,11 @@ def main(argv: list[str] | None = None, ex: Executor | None = None) -> int:
     if not docker_running(ex):
         print(DOCKER_DOWN, file=sys.stderr)
         return 2
-    return args.func(args, ex)
+    try:
+        return args.func(args, ex)
+    except RunnerError as e:  # the run is left resumable; say why and exit non-zero
+        print(f"Stopped: {e}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
