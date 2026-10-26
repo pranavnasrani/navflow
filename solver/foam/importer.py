@@ -25,6 +25,7 @@ Maths link (IGCSE 0606):
 from __future__ import annotations
 
 import json
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -43,6 +44,7 @@ FINISHED = ("done", "flagged")
 FIELD_NAMES = {"instant": ("U", "p", "k"), "mean": ("UMean", "pMean", "kMean")}
 NUT_NAME = "nut"  # eddy viscosity; the run exports no nutMean, so mean-field runs use the instantaneous nut
 SUMMARY_MARGIN = 0.25  # the N-S term summary covers the model bbox +- 0.25 D (D = longest bbox side)
+DIRECTION_TOLERANCE_DEG = 1e-6  # run.json and the config must name the same angle
 CLIP_PAD = 0.25  # extra D around the clip box so edge cells still have neighbours for their derivatives
 
 
@@ -191,6 +193,7 @@ def _metrics(
         "converged": bool(meta["converged"]),
         "filled_from": None,
         "eval_speed_m_s": float(v_c),  # the speed the fuel numbers are worked out at
+        "eval_altitude_km": float(cfd.cruise.get("altitude_km", 0.0)) if cfd.cruise else 0.0,  # 0 = sea level
         "eval_drag_power_kw": float(eval_power),
         "fuel_burn_l_per_hr": float(fuel_burn_l_per_hr(eval_power, float(obj_config["fuel_burn_factor_l_per_kwh"]))),
         # The three "saved" numbers and the reference angle need every finished direction: _apply_reference.
@@ -200,7 +203,8 @@ def _metrics(
         "reference_direction_deg": float(meta["direction_deg"]),
     }
     if "wind_load" in cfd.widgets:
-        metrics["wind_load"] = wind_load_table(float(force[0]), base_moment, v)
+        # The wind pushes the tower sideways: use the horizontal force |(Fx, Fy)|, like the moment's |(Mx, My)|.
+        metrics["wind_load"] = wind_load_table(float(np.hypot(force[0], force[1])), base_moment, v)
     return metrics
 
 
@@ -284,8 +288,18 @@ def import_object(
     bad = [i for i in runs if not 0 <= i < n_dir]
     if bad:
         raise ValueError(f"{obj_id}: direction index {bad} outside 0..{n_dir - 1}")
+    # The results are rotated back by the config's angle for this index, so a run made for a different
+    # angle (the config was edited since) would be drawn at the wrong rotation: treat it as not finished.
+    for idx, (result, meta) in sorted(runs.items()):
+        deg_run, deg_cfg = float(meta["direction_deg"]), float(cfd.directions_deg[idx])
+        if abs(deg_run - deg_cfg) > DIRECTION_TOLERANCE_DEG:
+            warnings.warn(f"{meta['run_id']}: run.json says {deg_run:g} deg but the config has {deg_cfg:g} deg "
+                          f"for direction {idx}; skipping this result (re-run it or restore the config)", stacklevel=2)
+            del runs[idx]
+    if not runs:
+        raise ValueError(f"No finished runs for {obj_id} that match the angles in the config")
 
-    heights = wand_heights(model0, settings.wand_count)
+    heights = wand_heights(model0, settings.wand_count, cfd.floor)
     states = {
         idx: _import_direction(idx, result, meta, settings, cfd, model0, obj_config, heights)
         for idx, (result, meta) in sorted(runs.items())

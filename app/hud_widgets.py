@@ -322,7 +322,6 @@ class SustainabilityOverlay(QFrame):
         lay.setSpacing(5)
 
         self._labels: list[QLabel] = []
-        self._worst: tuple[float, float] | None = None  # (peak force N, direction deg) seen so far
 
         hdr = QLabel("SUSTAINABILITY IMPACT")
         hdr.setStyleSheet("font-size: 12px; font-weight: 800; letter-spacing: 1px; color: #5CF2B0;")
@@ -383,7 +382,9 @@ class SustainabilityOverlay(QFrame):
         parts += [c.text() for row in getattr(self, "_table_cells", []) for c in row]
         return "\n".join(parts)
 
-    def set_metrics(self, metrics: dict) -> None:
+    def set_metrics(self, metrics: dict, worst_direction_deg: float | None = None) -> None:
+        """Show one state's numbers. `worst_direction_deg` is the object's worst solved wind direction
+        (ObjectStateManager.worst_direction_deg): one fixed value per object, not tracked while the knob moves."""
         if "fuel" in self.widgets:
             self._set_fuel(metrics)
         if "speed" in self.widgets:
@@ -391,7 +392,7 @@ class SustainabilityOverlay(QFrame):
             self.speed_big.setText(f"Top-speed gain vs worst angle: {gain:+.1f} %")
             self.speed_note.setText("same power: P = ½ρCdAV³, so V ∝ (CdA)^(−1/3), a cube root")
         if "wind_load" in self.widgets:
-            self._set_wind_load(metrics)
+            self._set_wind_load(metrics, worst_direction_deg)
 
     def _set_fuel(self, metrics: dict) -> None:
         """Fuel card: burned, saved against the object's own worst simulated angle, CO2 saved.
@@ -414,9 +415,11 @@ class SustainabilityOverlay(QFrame):
             self.co2_big.setText(f"CO₂ saved: {co2:,.1f} kg/h")
         eval_v = _num(metrics, "eval_speed_m_s")
         at_cruise = eval_v > 0.0 and abs(eval_v - _num(metrics, "wind_speed_m_s")) > 1e-6
-        self.fuel_note.setText(f"at cruise (11 km, {eval_v:.0f} m/s)" if at_cruise else "")
+        altitude = _num(metrics, "eval_altitude_km")  # from the config's cruise block; 0 = not given
+        where_cruise = f"{altitude:g} km, " if altitude > 0.0 else ""
+        self.fuel_note.setText(f"at cruise ({where_cruise}{eval_v:.0f} m/s)" if at_cruise else "")
 
-    def _set_wind_load(self, metrics: dict) -> None:
+    def _set_wind_load(self, metrics: dict, worst_direction_deg: float | None) -> None:
         rows = metrics.get("wind_load") or []
         while len(self._table_cells) < len(rows):  # grow the table once, then only change the text
             r = len(self._table_cells) + 1
@@ -433,16 +436,10 @@ class SustainabilityOverlay(QFrame):
             cells[2].setText(format_si(_num(row, "force_n"), "N"))
             cells[3].setText(format_si(_num(row, "moment_nm"), "N·m"))
 
-        if rows:  # the strongest reference wind is the last row; remember its largest force over the sweep
-            force = _num(rows[-1], "force_n")
-            theta = _num(metrics, "direction_deg")
-            if self._worst is None or force > self._worst[0]:
-                self._worst = (force, theta)
-        if self._worst is not None:
-            strongest = rows[-1].get("label", "") if rows else ""
-            self.worst_label.setText(
-                f"Worst direction so far: {self._worst[1]:.1f}°\n({format_si(self._worst[0], 'N')} in a {strongest})"
-            )
+        if worst_direction_deg is None:
+            self.worst_label.setText("")
+        else:
+            self.worst_label.setText(f"Worst wind direction: {worst_direction_deg:.1f}°")
 
 
 # --------------------------------------------------------------------------------------------------

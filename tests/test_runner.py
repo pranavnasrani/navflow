@@ -19,12 +19,17 @@ from solver import run_openfoam
 from solver.foam.geometry import prepare_model
 from solver.foam.queue import RunRecord, load_queue, save_queue
 from solver.foam.runner import (EXIT_MARKER, FORCE_SEP, FoamContainer, RunContext, RunnerError,
-                                SubprocessExecutor, run_batch, run_one, stop_flag)
+                                SubprocessExecutor, mesh_cell_count, run_batch, run_one, stop_flag)
 from solver.foam.settings import load_settings
 
 ROOT = Path(__file__).resolve().parent.parent
 SETTINGS, OBJECTS, _RAW = load_settings(ROOT / "config" / "exhibition_config.json")
 KEY = "full/airplane_d0"  # where the case lives in the volume: <mode>/<run_id>
+# The relevant part of a real checkMesh log ("cells:" sits in the Mesh stats block, indented).
+CHECKMESH_LOG = (
+    "Mesh stats\n    points:           1300\n    faces:            4000\n    internal faces:   3500\n"
+    "    cells:            {cells}\n    faces per cell:   6\n\nMesh OK.\n"
+)
 STEP = 100  # iterations the fake solver advances per poll
 
 
@@ -39,11 +44,11 @@ def noisy(it):  # drag swings +-10%: never converges
 class FakeExecutor:
     """Pretends to be docker + a container. `scenario(it) -> (drag, lift)` shapes the force history."""
 
-    def __init__(self, scenario=steady, bad_mesh=False, fatal_runs=(), on_poll=None, docker_ok=True):
+    def __init__(self, scenario=steady, bad_mesh=False, fatal_runs=(), on_poll=None, docker_ok=True, cells=1234):
         self.calls: list[list[str]] = []
         self.files: dict[tuple[str, str], str] = {}  # (run_id, rel_path) -> text
         self.scenario, self.bad_mesh, self.fatal_runs, self.on_poll = scenario, bad_mesh, set(fatal_runs), on_poll
-        self.docker_ok = docker_ok
+        self.docker_ok, self.cells = docker_ok, cells
         self.cases: set[str] = set()
         self.segments: dict[str, list[tuple[int, list[str]]]] = {}  # run -> [(start_time, rows)]
         self.iter: dict[str, int] = {}
@@ -138,7 +143,7 @@ class FakeExecutor:
             return self._cp(1)
 
         if "blockMesh" in script:
-            files[(run, "log.checkMesh")] = "Failed 2 mesh checks." if self.bad_mesh else "cells: 1234\nMesh OK."
+            files[(run, "log.checkMesh")] = "Failed 2 mesh checks." if self.bad_mesh else CHECKMESH_LOG.format(cells=self.cells)
             return self._cp(1 if self.bad_mesh else 0)
         if "decomposePar" in script:
             files[(run, "processor0")] = ""
@@ -316,7 +321,7 @@ def test_converged_run_is_done_instant(tmp_path, models):
     assert info == {"run_id": "airplane_d0", "obj_id": "airplane", "direction_index": 0,
                     "direction_deg": OBJECTS["airplane"].directions_deg[0],
                     "speed_m_s": OBJECTS["airplane"].speed_m_s, "iterations": rec.iterations,
-                    "converged": True, "fields": "instant", "status": "done"}
+                    "converged": True, "fields": "instant", "status": "done", "cells": 1234}
     assert list((tmp_path / "full/airplane/airplane_d0/result/VTK").glob("*.vtm"))
     assert (tmp_path / "full/airplane/airplane_d0/result/postProcessing").is_dir()
     assert ex.count("rm -rf /cases/full/airplane_d0") == 2  # once before the fresh copy, once after export
@@ -548,6 +553,107 @@ def test_finished_unseen_goes_straight_to_classification(tmp_path, models):
     assert ex.count("mpirun -np 4 simpleFoam") == 0 and ex.count("blockMesh") == 0
     assert ex.count("stopAt -set writeNow") == 0
     assert rec.status == "done" and rec.iterations == 300
+
+
+# --- final fix wave: retry, mesh size, error handling, status ---
+
+def test_mesh_cell_count_parses_checkmesh_and_ignores_other_lines():
+    assert mesh_cell_count(CHECKMESH_LOG.format(cells=1234567)) == 1234567
+    assert mesh_cell_count("Mesh OK.\n") is None
+    assert mesh_cell_count("    cells: lots\n") is None
+    assert mesh_cell_count("    boundary cells:   55\n    cells:   42\n") == 42  # only the Mesh stats line
+
+
+def test_cell_count_is_reported_and_saved_in_run_json(tmp_path, models):
+    ex = FakeExecutor(cells=1234)
+    said = []
+    ctx = replace(make_ctx(tmp_path, models, ex), say=said.append)
+    rec = run_one(waiting(), ctx)
+    assert rec.status == "done" and rec.cells == 1234
+    assert any("1234 cells" in m and "WARNING" not in m for m in said)
+    info = json.loads((tmp_path / "full/airplane/airplane_d0/result/run.json").read_text())
+    assert info["cells"] == 1234
+
+
+def test_cell_count_near_the_cap_warns(tmp_path, models):
+    ex = FakeExecutor(cells=5_500_000)  # 92% of maxGlobalCells (6 000 000)
+    said = []
+    ctx = replace(make_ctx(tmp_path, models, ex), say=said.append)
+    run_one(waiting(), ctx)
+    warning = [m for m in said if "WARNING" in m]
+    assert warning and "maxGlobalCells" in warning[0] and "5500000 cells" in warning[0]
+    said.clear()
+    ex2 = FakeExecutor(cells=5_300_000)  # 88%: no warning
+    ctx2 = replace(make_ctx(tmp_path / "b", models, ex2), say=said.append)
+    run_one(waiting(), ctx2)
+    assert not [m for m in said if "WARNING" in m]
+
+
+def test_retry_failed_resets_only_this_machines_failed_runs(tmp_path, models, monkeypatch, capsys):
+    ex = FakeExecutor(scenario=steady)
+    runs = tmp_path / "runs" / "full"
+    runs.mkdir(parents=True)
+    monkeypatch.setattr(run_openfoam, "_runs_root", lambda preview: runs)
+    failed = waiting("airplane", 0, "failed")
+    failed.iterations, failed.log = 77, "boom"
+    save_queue(runs / "queue_laptop.json", [failed, waiting("airplane", 4, "done")])
+    other = waiting("f1_car", 0, "failed")
+    save_queue(runs / "queue_mini.json", [other])
+    monkeypatch.setattr(run_openfoam, "_build_context", lambda args, ex, root, cap, obj_ids, **kw: make_ctx(tmp_path, models, ex))
+    monkeypatch.setattr(run_openfoam, "run_batch", lambda *a, **k: [])
+
+    assert run_openfoam.main(["run", "--objects", "airplane", "--retry-failed"], ex=ex) == 0
+    assert "Reset 1 failed run" in capsys.readouterr().out
+    laptop = {r.run_id: r for r in load_queue(runs / "queue_laptop.json")}
+    assert laptop["airplane_d0"].status == "waiting" and laptop["airplane_d0"].iterations == 0
+    assert laptop["airplane_d4"].status == "done"
+    assert load_queue(runs / "queue_mini.json")[0].status == "failed"  # another machine's queue is untouched
+
+
+def test_failed_run_is_run_again_after_reset(tmp_path, models):
+    ex = FakeExecutor(scenario=steady, fatal_runs={KEY})
+    ctx = make_ctx(tmp_path, models, ex)
+    handled = run_batch(["airplane"], ctx, "laptop", directions=[0])
+    assert handled[0].status == "failed"
+    assert run_batch(["airplane"], ctx, "laptop", directions=[0]) == []  # failed runs are skipped forever ...
+    qpath = ctx.root / "queue_laptop.json"
+    records = load_queue(qpath)
+    from solver.foam.queue import reset_failed
+    assert reset_failed(records) == 1
+    save_queue(qpath, records)
+    ex.fatal_runs = set()
+    handled = run_batch(["airplane"], ctx, "laptop", directions=[0])  # ... until they are reset
+    assert [(r.run_id, r.status) for r in handled] == [("airplane_d0", "done")]
+
+
+def test_docker_command_error_is_a_clean_stop(tmp_path, monkeypatch, capsys):
+    class Exploding(FakeExecutor):
+        def run(self, args, check=True):
+            if args[:2] == ["docker", "run"]:
+                raise subprocess.CalledProcessError(125, args, stderr="boom")
+            return super().run(args, check)
+
+    monkeypatch.setattr(run_openfoam, "_build_context", lambda args, ex, root, cap, obj_ids, **kw: make_ctx(tmp_path, {}, ex))
+    code = run_openfoam.main(["run", "--objects", "airplane"], ex=Exploding())
+    assert code == 1
+    err = capsys.readouterr().err
+    assert err.startswith("Stopped:") and "docker" in err
+
+
+def test_status_honours_machine(tmp_path, monkeypatch, capsys):
+    runs = tmp_path / "runs" / "full"
+    runs.mkdir(parents=True)
+    monkeypatch.setattr(run_openfoam, "_runs_root", lambda preview: runs)
+    save_queue(runs / "queue_laptop.json", [waiting("airplane", 0, "done")])
+    save_queue(runs / "queue_mini.json", [waiting("f1_car", 0, "running")])
+    assert run_openfoam.main(["status", "--machine", "mini"], ex=FakeExecutor()) == 0
+    out = capsys.readouterr().out
+    assert "f1_car_d0" in out and "airplane_d0" not in out
+    assert run_openfoam.main(["status"], ex=FakeExecutor()) == 0  # no --machine: every machine's queue
+    out = capsys.readouterr().out
+    assert "f1_car_d0" in out and "airplane_d0" in out
+    assert run_openfoam.main(["status", "--machine", "ghost"], ex=FakeExecutor()) == 0
+    assert "No queue found" in capsys.readouterr().out
 
 
 # --- Docker integration ---------------------------------------------------------------------

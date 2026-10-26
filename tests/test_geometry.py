@@ -6,6 +6,7 @@ import trimesh
 from solver.foam.geometry import (
     ModelNotWatertight,
     frontal_area,
+    load_prepared,
     prepare_model,
     rotation_matrix,
     run_geometry,
@@ -140,3 +141,33 @@ def test_wand_and_rake_shapes():
     assert np.all(rake[:, 0] < m.bounds[0][0])
     assert np.all(rake[:, 2] == pytest.approx(z[3]))
     assert rake[0, 1] == pytest.approx(-1 - 0.2) and rake[-1, 1] == pytest.approx(1 + 0.2)
+
+
+def test_wand_heights_free_air_spans_below_and_above():
+    m = trimesh.creation.box(extents=(4, 2, 1))  # z in [-0.5, 0.5], H = 1
+    z = wand_heights(m, 10, floor="none")
+    assert z[0] == pytest.approx(-0.6) and z[-1] == pytest.approx(0.6)
+
+
+@pytest.mark.parametrize("floor", ["moving", "rough", "slip"])
+def test_wand_heights_floor_bound_lowest_wand_is_just_above_the_floor(floor):
+    m = trimesh.creation.box(extents=(4, 2, 10)).apply_translation((0, 0, 5))  # z in [0, 10], H = 10
+    z = wand_heights(m, 10, floor=floor)
+    assert z[0] == pytest.approx(0.02 * 10)  # 0.02 H above the floor, not underground
+    assert z[-1] == pytest.approx(10 + 0.1 * 10)  # the top is unchanged: zmax + 0.1 H
+    assert np.all(z > 0) and np.all(np.diff(z) > 0)
+
+
+def test_load_prepared_does_not_rotate_a_second_time(tmp_path):
+    """prepare_model applies base_rotation_deg once; reloading its saved STL must not re-apply it."""
+    cfd = make_cfd(floor="none", base_rotation_deg=(0.0, 30.0, 45.0), size_axis="x", real_size_m=6.0)
+    src = save(stl_box(3.0, 1.0, 0.5, centre=(1.0, 2.0, 3.0)), tmp_path, "src.stl")
+    prepared = prepare_model(src, cfd)
+    out = tmp_path / "model.stl"
+    prepared.export(out)
+
+    again = load_prepared(out, cfd)
+    assert np.allclose(again.bounds, prepared.bounds, atol=1e-4)
+    assert np.allclose(np.sort(again.vertices, axis=0), np.sort(prepared.vertices, axis=0), atol=1e-4)
+    # prepare_model on the saved file WOULD rotate again (this is the bug being guarded against)
+    assert not np.allclose(prepare_model(out, cfd).bounds, prepared.bounds, atol=1e-3)

@@ -28,6 +28,7 @@ class RunRecord:
     converged: bool = False
     log: str = ""
     machine: str = ""
+    cells: int = 0  # mesh size from checkMesh (0 = not meshed yet)
 
 
 def coarse_first_order(n: int) -> list[int]:
@@ -107,6 +108,21 @@ def merge_queue(existing: list[RunRecord], new: list[RunRecord]) -> list[RunReco
     seen = {r.run_id for r in new}
     merged.extend(r for r in existing if r.run_id not in seen)
     return merged
+
+
+def reset_failed(records: list[RunRecord]) -> int:
+    """Put every `failed` record back to `waiting` (no iterations, not converged, no log). Returns how many.
+
+    Failed runs are otherwise skipped for ever; this is how `run_openfoam.py run --retry-failed` retries
+    them after the cause (a bad mesh setting, a crashed container) has been fixed. A retried run
+    starts from a clean case, because only running/stopped runs are resumed.
+    """
+    n = 0
+    for r in records:
+        if r.status == "failed":
+            r.status, r.iterations, r.converged, r.log = "waiting", 0, False, ""
+            n += 1
+    return n
 
 
 def next_run(records: list[RunRecord]) -> RunRecord | None:

@@ -112,14 +112,14 @@ def test_overlay_text(qapp):
     assert "Fuel burned: 900.0 L/h" in text and "Top-speed gain vs worst angle: +8.2 %" in text
 
     tower = SustainabilityOverlay(("wind_load",), None)
-    tower.set_metrics({"wind_load": _wind_load(), "direction_deg": 15.0})
+    tower.set_metrics({"wind_load": _wind_load(), "direction_deg": 15.0}, 37.5)
     text = tower.all_text()
-    assert "Category 5" in text and "SDG 9" in text and "Worst direction so far" in text
+    assert "Category 5" in text and "SDG 9" in text and "Worst wind direction: 37.5°" in text
 
 
 def _fuel_metrics(direction):
     return {
-        "direction_deg": direction, "reference_direction_deg": 4.0, "wind_speed_m_s": 102.0, "eval_speed_m_s": 250.0,
+        "direction_deg": direction, "reference_direction_deg": 4.0, "wind_speed_m_s": 102.0, "eval_speed_m_s": 250.0, "eval_altitude_km": 11.0,
         "fuel_burn_l_per_hr": 900.0, "fuel_saved_l_per_hr": 123.4, "co2_saved_kg_per_hr": 311.0, "speed_gain_pct": 8.2,
     }
 
@@ -136,6 +136,13 @@ def test_overlay_worst_angle_text(qapp):
     assert "at cruise (11 km, 250 m/s)" in text
     fuel.set_metrics(_fuel_metrics(5.0))  # an interpolated knob position between two angles: the normal text
     assert "Saved vs worst angle" in fuel.all_text()
+    m = _fuel_metrics(6.0)
+    m["eval_altitude_km"] = 9.0  # the altitude comes from the metrics (config), not a fixed "11 km"
+    fuel.set_metrics(m)
+    assert "at cruise (9 km, 250 m/s)" in fuel.all_text() and "11 km" not in fuel.all_text()
+    m["eval_altitude_km"] = 0.0
+    fuel.set_metrics(m)
+    assert "at cruise (250 m/s)" in fuel.all_text()
 
 
 def test_overlay_cruise_note_only_when_evaluated_off_the_simulated_speed(qapp):
@@ -146,16 +153,18 @@ def test_overlay_cruise_note_only_when_evaluated_off_the_simulated_speed(qapp):
     assert "cruise" not in car.all_text()
 
 
-def test_overlay_worst_direction_tracks_the_peak(qapp):
+def test_overlay_worst_direction_is_the_given_value_not_a_running_maximum(qapp):
     tower = SustainabilityOverlay(("wind_load",), None)
+    # The strongest load is seen first, then weaker ones, at other angles: the text only follows the given worst angle.
     for deg, scale in ((0.0, 1.0), (30.0, 3.0), (60.0, 2.0)):
-        tower.set_metrics({"wind_load": _wind_load(scale), "direction_deg": deg})
-    assert "30.0°" in tower.worst_label.text()
-    # a second call with the same data does not grow the table
-    n_cells = len(tower._table_cells)
-    tower.set_metrics({"wind_load": _wind_load(1.0), "direction_deg": 10.0})
+        tower.set_metrics({"wind_load": _wind_load(scale), "direction_deg": deg}, 22.5)
+        assert tower.worst_label.text() == "Worst wind direction: 22.5°"
+    assert "so far" not in tower.all_text()
+    n_cells = len(tower._table_cells)  # a repeated call does not grow the table
+    tower.set_metrics({"wind_load": _wind_load(1.0), "direction_deg": 10.0}, 22.5)
     assert len(tower._table_cells) == n_cells == 2
-    assert "30.0°" in tower.worst_label.text()
+    tower.set_metrics({"wind_load": _wind_load(1.0), "direction_deg": 10.0})  # no worst direction known
+    assert tower.worst_label.text() == ""
 
 
 def test_overlay_without_widgets_is_hidden(qapp):

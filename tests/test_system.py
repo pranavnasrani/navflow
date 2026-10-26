@@ -131,6 +131,32 @@ def test_filled_and_non_numeric_metrics_come_from_nearest(tmp_path):
     assert np.isclose(near_3["metrics"]["drag_force_n"], 100.0 + 2 + 0.6)
 
 
+def test_worst_direction_is_computed_once_at_load(tmp_path):
+    cfg = {"id": "building", "cfd": {"speed_m_s": 50.0, "widgets": ["wind_load"]}}
+    write_fake_cache(tmp_path / "building_states.npz", cfg)  # the force in the last row is the direction index
+    mgr = ObjectStateManager("building", cache_dir=tmp_path)
+    assert mgr.worst_direction_deg == mgr.directions_deg[8]  # force 8.0 is the largest
+    for knob in (0.0, 0.3, 1.0):  # independent of where the knob is
+        assert mgr.get_state(0, knob)["worst_direction_deg"] == mgr.directions_deg[8]
+
+    fuel = {"id": "airplane", "cfd": {"speed_m_s": 102.0, "widgets": ["fuel", "speed"]}}
+    write_fake_cache(tmp_path / "airplane_states.npz", fuel)
+    assert ObjectStateManager("airplane", cache_dir=tmp_path).get_state(0, 0.5)["worst_direction_deg"] is None
+
+
+def test_worst_wind_direction_ignores_filled_directions_and_uses_the_strongest_wind_row():
+    from app.state_manager import worst_wind_direction
+
+    def m(weak, strong, filled=None):
+        return {"wind_load": [{"force_n": weak}, {"force_n": strong}], "filled_from": filled}
+
+    dirs = [0.0, 7.5, 15.0, 22.5]
+    metrics = [m(1.0, 10.0), m(9.0, 30.0), m(2.0, 20.0), m(9.0, 99.0, filled=2)]  # the 99 is a copy: not solved
+    assert worst_wind_direction(dirs, metrics) == 7.5
+    assert worst_wind_direction(dirs, [m(5.0, 5.0)] * 4) == 0.0  # ties: the lower direction
+    assert worst_wind_direction(dirs, [{"filled_from": None}] * 4) is None
+
+
 def test_lookup_under_1ms_real_size(tmp_path):
     # ~200k surface vertices, 5 lines x 20,001 rows = ~100k points per wand, 9 directions x 2 wands.
     cfg = _object_config("f1_car")

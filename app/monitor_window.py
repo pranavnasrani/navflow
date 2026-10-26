@@ -424,7 +424,7 @@ class MonitorWindow(QMainWindow):
         else:
             self.lbl_filled.hide()
 
-        self.overlay.set_metrics(metrics)
+        self.overlay.set_metrics(metrics, state.get("worst_direction_deg"))
         self.overlay.fit(self.overlay.width())
         self.overlay.raise_()
 

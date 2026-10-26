@@ -11,6 +11,7 @@ from solver.foam.queue import (
     load_queue,
     merge_queue,
     next_run,
+    reset_failed,
     save_queue,
 )
 from solver.foam.settings import load_settings
@@ -109,3 +110,15 @@ def test_merge_follows_new_order_and_keeps_existing_only_records():
     # New order first; finished runs absent from `new` are appended so no result is lost.
     assert [r.run_id for r in merged] == ["a_d4", "a_d0", "old_d0"]
     assert merged[1].status == "done"
+
+
+def test_reset_failed_puts_only_failed_records_back_to_waiting():
+    recs = [_rec("a_d0", "failed", iterations=120, log="boom"), _rec("a_d1", "done", iterations=300, converged=True),
+            _rec("a_d2", "stopped", iterations=80), _rec("a_d3", "failed", iterations=9)]
+    assert reset_failed(recs) == 2
+    assert [r.status for r in recs] == ["waiting", "done", "stopped", "waiting"]
+    assert recs[0].iterations == 0 and recs[0].converged is False and recs[0].log == ""
+    assert recs[1].iterations == 300 and recs[1].converged  # untouched
+    assert recs[2].iterations == 80
+    assert next_run(recs).run_id == "a_d2"  # the interrupted one is still resumed first
+    assert reset_failed(recs) == 0

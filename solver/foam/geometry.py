@@ -15,6 +15,7 @@ Maths link (IGCSE 0606):
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -114,6 +115,16 @@ def prepare_model(src: Path, cfd: ObjectCfd) -> trimesh.Trimesh:
     return mesh
 
 
+def load_prepared(path: Path, cfd: ObjectCfd) -> trimesh.Trimesh:
+    """Reload a model that `prepare_model` already wrote (assets/models/<id>/model.stl).
+
+    The saved STL is already rotated by `base_rotation_deg`, scaled and placed, so the base rotation
+    must NOT be applied a second time (rotations compose by matrix multiplication: R x R = R(2 theta)).
+    Everything that re-reads model.stl for runs or the import goes through here, in one place.
+    """
+    return prepare_model(path, replace(cfd, base_rotation_deg=(0.0, 0.0, 0.0)))
+
+
 def run_geometry(model0: trimesh.Trimesh, cfd: ObjectCfd, deg: float) -> trimesh.Trimesh:
     """Copy of `model0` rotated by `deg` about the origin, around `cfd.rotation_axis`."""
     out = model0.copy()
@@ -163,11 +174,17 @@ def frontal_area(model: trimesh.Trimesh, resolution: int = 400) -> float:
     return float(np.count_nonzero(np.asarray(img))) * pixel * pixel
 
 
-def wand_heights(model0: trimesh.Trimesh, count: int) -> np.ndarray:
-    """`count` evenly spaced z heights from zmin - 0.1H to zmax + 0.1H (H = model height)."""
+def wand_heights(model0: trimesh.Trimesh, count: int, floor: str = "none") -> np.ndarray:
+    """`count` evenly spaced smoke-wand z heights (an arithmetic progression), H = model height.
+
+    Free air (`floor` "none"): from zmin - 0.1 H to zmax + 0.1 H.
+    Floor-bound objects (any other `floor`): the ground is at z = 0, so the lowest wand sits 0.02 H
+    above it instead of underground; the top stays at zmax + 0.1 H.
+    """
     lo, hi = model0.bounds[:, 2]
     h = hi - lo
-    return np.linspace(lo - 0.1 * h, hi + 0.1 * h, count)
+    bottom = lo - 0.1 * h if floor == "none" else 0.02 * h
+    return np.linspace(bottom, hi + 0.1 * h, count)
 
 
 def seed_rake(run_model: trimesh.Trimesh, z: float, n: int) -> np.ndarray:

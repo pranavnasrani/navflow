@@ -37,6 +37,9 @@ VERBATIM = ("fvSchemes", "fvSolution")  # copied to system/ without substitution
 
 # Offsets of locationInMesh from the tunnel's lower upstream corner, in cell sizes h. They are
 # irrational-looking on purpose so the point never lands on a face of any refined cell.
+# snappyHexMesh cell budget. maxLocalCells is set equal to maxGlobalCells: a smaller local cap silently
+# stops refinement part-way (it is a limit per processor, and we mesh on one). The runner warns at 90 %.
+MAX_GLOBAL_CELLS = 6_000_000
 LOCATION_OFFSETS = (1.37, 1.41, 1.73)
 TURBULENCE_INTENSITY = 0.05
 CMU = 0.09
@@ -168,7 +171,7 @@ def write_case(case_dir: Path, run_model: trimesh.Trimesh, cfd: ObjectCfd, s: Fo
         "wake_ymin": _num(lo[1] - 0.5 * d), "wake_ymax": _num(hi[1] + 0.5 * d),
         "wake_zmin": _num(lo[2] - 0.5 * d), "wake_zmax": _num(hi[2] + 0.5 * d),
         "feature_level": surf_max, "surface_min": surf_min, "surface_max": surf_max,
-        "wake_level": s.wake_refinement, "n_layers": s.n_layers,
+        "wake_level": s.wake_refinement, "max_cells": MAX_GLOBAL_CELLS, "n_layers": s.n_layers,
         "loc_x": repr(xmin + LOCATION_OFFSETS[0] * h),
         "loc_y": repr(ymin + LOCATION_OFFSETS[1] * h),
         "loc_z": repr(zmin + LOCATION_OFFSETS[2] * h),

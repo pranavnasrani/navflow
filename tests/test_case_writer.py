@@ -10,7 +10,7 @@ import pytest
 import trimesh
 
 from solver.foam.case_writer import RunSpec, write_case
-from solver.foam.geometry import prepare_model, run_geometry, tunnel_bounds
+from solver.foam.geometry import load_prepared, prepare_model, run_geometry, tunnel_bounds
 from solver.foam.settings import load_settings
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -197,7 +197,7 @@ def test_starter_airplane_meshes(tmp_path):
     if not docker_available():
         pytest.skip("Docker is not running")
     cfd = OBJECTS["airplane"]
-    model0 = prepare_model(ROOT / "assets/models/airplane/model.stl", cfd)
+    model0 = load_prepared(ROOT / "assets/models/airplane/model.stl", cfd)
     model = run_geometry(model0, cfd, cfd.directions_deg[0])
     settings = replace(SETTINGS, base_cells_per_size=4, surface_refinement=(2, 3))
     case = tmp_path / "case"
@@ -218,3 +218,11 @@ def test_starter_airplane_meshes(tmp_path):
         assert "Mesh OK." in out, out[-3000:]
     finally:
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+
+
+def test_snappy_cell_caps_are_equal_and_large(tmp_path):
+    """maxLocalCells below maxGlobalCells would silently cap refinement; both are the same 6 million."""
+    case, _, _ = write(tmp_path, "f1_car")
+    snappy = (case / "system/snappyHexMeshDict").read_text()
+    assert re.search(r"maxLocalCells\s+6000000;", snappy)
+    assert re.search(r"maxGlobalCells\s+6000000;", snappy)

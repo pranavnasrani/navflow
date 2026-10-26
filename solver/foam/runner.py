@@ -1,7 +1,7 @@
 """Resumable Docker batch runner: drives OpenFOAM v2512 for every (object, wind direction) run.
 
 Everything OpenFOAM runs inside one long-lived container (`navflow-<machine>`) whose Docker
-volume `navflow-cases` holds the cases at /cases/<run_id>. The Python side only writes the case,
+volume `navflow-cases` holds the cases at /cases/<mode>/<run_id>. The Python side only writes the case,
 copies it in, issues shell commands, polls the force history and copies the results out.
 
 Resuming is the key requirement (about 36 multi-hour runs; laptops sleep, Docker restarts):
@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 import shutil
 import signal
 import subprocess
@@ -35,7 +36,7 @@ from typing import Callable, Protocol
 
 import trimesh
 
-from solver.foam.case_writer import RunSpec, write_case
+from solver.foam.case_writer import MAX_GLOBAL_CELLS, RunSpec, write_case
 from solver.foam.convergence import is_converged, is_diverged, load_forces
 from solver.foam.geometry import run_geometry
 from solver.foam.queue import RunRecord, build_queue, load_queue, merge_queue, next_run, save_queue
@@ -63,6 +64,16 @@ VTK_FIELDS = "(U p k omega nut UMean pMean kMean)"
 # Every solver log starts with the banner "trapFpe: Floating point exception trapping enabled", which
 # is not an error, so lines containing "trapping enabled" are ignored.
 FATAL_SCRIPT = "grep -E 'FOAM FATAL|Floating point exception' log.simpleFoam | grep -qv 'trapping enabled'"
+
+
+CELLS_LINE = re.compile(r"^\s*cells:\s+(\d+)\s*$", re.MULTILINE)  # the "Mesh stats" line of checkMesh
+CELLS_WARN_FRACTION = 0.9  # warn when the mesh uses more than 90 % of snappyHexMesh's cell budget
+
+
+def mesh_cell_count(checkmesh_log: str) -> int | None:
+    """Number of cells from the "cells:" line of a checkMesh log, or None if there is none."""
+    m = CELLS_LINE.search(checkmesh_log)
+    return int(m.group(1)) if m else None
 
 
 class RunnerError(RuntimeError):
@@ -237,20 +248,33 @@ def _write_and_mesh(rec: RunRecord, ctx: RunContext) -> bool:
     c.copy_in(case_dir, key)
     ctx.say(f"[{rec.run_id}] meshing")
     c.sh(key, MESH_SCRIPT, check=False)
-    if "Mesh OK." not in c.read(key, "log.checkMesh"):
+    check_log = c.read(key, "log.checkMesh")
+    if "Mesh OK." not in check_log:
         _fail(rec, ctx, "checkMesh did not report 'Mesh OK.' (see log.checkMesh)")
         return False
+    _report_cells(rec, ctx, check_log)
     return True
+
+
+def _report_cells(rec: RunRecord, ctx: RunContext, check_log: str) -> None:
+    """Say how many cells the mesh has, keep it in the record (-> run.json) and warn near the cell cap.
+
+    Maths link (IGCSE 0606): the warning is a percentage test, cells / maxGlobalCells > 90 %.
+    """
+    cells = mesh_cell_count(check_log)
+    if cells is None:
+        return
+    rec.cells = cells
+    ctx.say(f"[{rec.run_id}] mesh has {cells} cells ({100 * cells / MAX_GLOBAL_CELLS:.0f}% of maxGlobalCells)")
+    if cells > CELLS_WARN_FRACTION * MAX_GLOBAL_CELLS:
+        ctx.say(f"[{rec.run_id}] WARNING: {cells} cells is over 90% of maxGlobalCells ({MAX_GLOBAL_CELLS}); "
+                "snappyHexMesh may have stopped refining early - check log.snappyHexMesh")
 
 
 def mesh_only(rec: RunRecord, ctx: RunContext) -> RunRecord:
     """Write, copy in and mesh a case, then stop. The case stays in the volume to inspect."""
     if _write_and_mesh(rec, ctx):
-        cells = ""
-        for line in ctx.container.read(case_key(rec, ctx), "log.checkMesh").splitlines():
-            if line.strip().startswith("cells:"):
-                cells = line.strip()
-        rec.log = f"Mesh OK. {cells}".strip()
+        rec.log = f"Mesh OK. cells: {rec.cells}" if rec.cells else "Mesh OK."
         ctx.say(f"[{rec.run_id}] {rec.log}")
     return rec
 
@@ -338,6 +362,7 @@ def _export(rec: RunRecord, ctx: RunContext, fields: str) -> RunRecord:
         "run_id": rec.run_id, "obj_id": rec.obj_id, "direction_index": rec.direction_index,
         "direction_deg": rec.direction_deg, "speed_m_s": ctx.objects[rec.obj_id].speed_m_s,
         "iterations": rec.iterations, "converged": rec.converged, "fields": fields, "status": rec.status,
+        "cells": rec.cells,
     }, indent=2))
     ctx.say(f"[{rec.run_id}] {rec.status} after {rec.iterations} iterations (fields: {fields})")
     _notify(rec, ctx)  # record the final status BEFORE freeing the volume: a crash in between is harmless
@@ -414,6 +439,11 @@ def run_one(rec: RunRecord, ctx: RunContext) -> RunRecord:
     return rec
 
 
+def queue_path(root: Path, machine: str) -> Path:
+    """This machine's queue file inside a runs folder."""
+    return Path(root) / f"queue_{machine}.json"
+
+
 def run_batch(obj_ids: list[str], ctx: RunContext, machine: str,
               directions: list[int] | None = None) -> list[RunRecord]:
     """Work through this machine's queue until it is empty or a stop is requested.
@@ -423,7 +453,7 @@ def run_batch(obj_ids: list[str], ctx: RunContext, machine: str,
     """
     root = Path(ctx.root)
     root.mkdir(parents=True, exist_ok=True)
-    qpath = root / f"queue_{machine}.json"
+    qpath = queue_path(root, machine)
     records = merge_queue(load_queue(qpath), build_queue(ctx.objects, obj_ids, directions))
     save_queue(qpath, records)
     flag = stop_flag(root)

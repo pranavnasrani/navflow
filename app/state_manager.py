@@ -42,6 +42,25 @@ def _blend_numbers(a: dict, b: dict, t: float, nearest: dict) -> dict:
     return out
 
 
+def worst_wind_direction(directions_deg, metrics_list: list[dict]) -> float | None:
+    """The solved direction (theta in degrees) whose wind load is largest, or None if there is no wind-load table.
+
+    "Wind load" is the force in the LAST row of the table (the strongest reference wind, a hurricane): every row is
+    the same simulated force times (v / v_sim)^2, so the largest row-force is also the largest simulated force.
+    Directions that were filled from a neighbour (`filled_from` is not None) only copy that neighbour's numbers, so
+    they are not candidates. Ties go to the lower direction (max returns the first).
+    """
+    best: tuple[float, float] | None = None
+    for deg, m in zip(directions_deg, metrics_list):
+        rows = m.get("wind_load")
+        if not rows or m.get("filled_from") is not None:
+            continue
+        force = float(rows[-1]["force_n"])
+        if best is None or force > best[0]:
+            best = (force, float(deg))
+    return None if best is None else best[1]
+
+
 class ObjectStateManager:
     def __init__(self, obj_id: str, cache_dir: Path | str = "assets/cache"):
         self.obj_id = obj_id
@@ -68,6 +87,8 @@ class ObjectStateManager:
         n_dir, n_wand = len(self.directions_deg), len(self.wand_heights)
         wind_vectors = np.asarray(data["wind_vectors"], dtype=float)
 
+        self.worst_direction_deg: float | None = None  # set below, once the metrics are decoded
+
         # Decode everything now so get_state never touches JSON or the npz file.
         self._wind_vectors = wind_vectors
         self._metrics = []
@@ -87,6 +108,9 @@ class ObjectStateManager:
                 )
                 for w in range(n_wand)
             ])
+
+        # Computed once here (not per frame, and not from the angles a visitor happened to visit).
+        self.worst_direction_deg = worst_wind_direction(self.directions_deg, self._metrics)
 
     def direction_for_knob(self, knob: float) -> float:
         """Straight-line map d = d_min + knob * (d_max - d_min), with the knob clamped to [0, 1]."""
@@ -141,6 +165,7 @@ class ObjectStateManager:
             "wind_speed": self.wind_speed,
             "wind_vector": wind_vector,
             "metrics": metrics,
+            "worst_direction_deg": self.worst_direction_deg,  # None unless the object has a wind-load table
             "ns_terms": ns_terms,
             "surface_pressure": pressure,
             "lines": lines,

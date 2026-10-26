@@ -1,5 +1,6 @@
 """Tests for solver.foam.importer and app.cache_format: OpenFOAM results -> v2 cache."""
 import json
+import math
 from dataclasses import replace
 from pathlib import Path
 
@@ -184,7 +185,7 @@ def test_metrics_values(root, tmp_path):
     assert (m["iterations"], m["converged"], m["filled_from"]) == (300, True, None)
     # one finished direction: it is its own reference, so nothing is saved against it
     assert m["eval_drag_power_kw"] == pytest.approx(m["drag_power_kw"])  # no cruise: simulated condition
-    assert m["eval_speed_m_s"] == SPEED
+    assert m["eval_speed_m_s"] == SPEED and m["eval_altitude_km"] == 0.0  # sea level: no cruise block
     assert m["fuel_burn_l_per_hr"] == pytest.approx(m["drag_power_kw"] * 0.28)
     assert (m["fuel_saved_l_per_hr"], m["co2_saved_kg_per_hr"], m["speed_gain_pct"]) == (0.0, 0.0, 0.0)
     assert m["reference_direction_deg"] == 40.0
@@ -193,7 +194,7 @@ def test_metrics_values(root, tmp_path):
 
 
 def test_plane_uses_cruise_condition(root, tmp_path):
-    cfd = make_cfd(cruise={"density_kg_m3": 0.364, "speed_m_s": 250.0})
+    cfd = make_cfd(cruise={"density_kg_m3": 0.364, "speed_m_s": 250.0, "altitude_km": 11})
     model0 = make_model0()
     write_fake_result(root, cfd, model0, 4)
     _, out, _, _ = run_import(root, tmp_path, cfd, model0=model0)
@@ -201,6 +202,7 @@ def test_plane_uses_cruise_condition(root, tmp_path):
     cda = m["drag_coefficient_cd"] * m["frontal_area_m2"]
     assert m["eval_drag_power_kw"] == pytest.approx(0.5 * 0.364 * cda * 250.0**3 / 1000.0)
     assert m["eval_speed_m_s"] == 250.0
+    assert m["eval_altitude_km"] == 11.0  # from the config's cruise block, shown on the HUD note
     assert m["fuel_burn_l_per_hr"] == pytest.approx(m["eval_drag_power_kw"] * 0.28)
     assert m["drag_power_kw"] == pytest.approx(100.0 * SPEED / 1000)  # the simulated value is unchanged
 
@@ -256,8 +258,56 @@ def test_wind_load_table_for_wind_load_objects(root, tmp_path):
     m = json.loads(read_cache(out)["d4_metrics"])
     cat5 = m["wind_load"][-1]
     assert cat5["v_m_s"] == 70
-    assert cat5["force_n"] == pytest.approx(100.0 * (70 / SPEED) ** 2)
+    assert cat5["force_n"] == pytest.approx(math.hypot(100.0, 5.0) * (70 / SPEED) ** 2)  # horizontal force |(Fx, Fy)|
     assert cat5["moment_nm"] == pytest.approx(50.0 * (70 / SPEED) ** 2)
+
+
+def test_wind_load_force_is_the_horizontal_force_not_just_fx(root, tmp_path):
+    """A tower turned to the wind feels a sideways force too: use hypot(Fx, Fy), like the moment's hypot(Mx, My)."""
+    cfd = make_cfd(widgets=("wind_load",))
+    model0 = make_model0()
+    write_fake_result(root, cfd, model0, 4, forces=[(i, 60.0, 80.0, 20.0) for i in range(1, 301)])
+    _, out, _, _ = run_import(root, tmp_path, cfd, model0=model0)
+    m = json.loads(read_cache(out)["d4_metrics"])
+    assert m["wind_load"][-1]["force_n"] == pytest.approx(100.0 * (70 / SPEED) ** 2)  # hypot(60, 80) = 100
+    assert m["drag_force_n"] == 60.0 and m["side_force_n"] == 80.0  # the plain components are kept
+
+
+def test_result_with_a_different_direction_than_the_config_is_skipped_with_a_warning(root, tmp_path):
+    cfd, model0 = make_cfd(), make_model0()
+    write_fake_result(root, cfd, model0, 0)
+    write_fake_result(root, cfd, model0, 4)
+    run_json = root / "box" / "box_d4" / "result" / "run.json"
+    meta = json.loads(run_json.read_text())
+    meta["direction_deg"] = 37.5  # the config now says 40: the run was made for another angle
+    run_json.write_text(json.dumps(meta))
+    with pytest.warns(UserWarning, match=r"box_d4.*37.5.*40"):
+        report, out, _, _ = run_import(root, tmp_path, cfd, model0=model0)
+    assert report["imported"] == [0]  # treated as not finished: the slot is filled instead
+    assert report["filled"][4] == 0
+
+
+def test_all_results_mismatching_the_config_is_an_error(root, tmp_path):
+    cfd, model0 = make_cfd(), make_model0()
+    write_fake_result(root, cfd, model0, 4)
+    run_json = root / "box" / "box_d4" / "result" / "run.json"
+    meta = json.loads(run_json.read_text())
+    meta["direction_deg"] = 41.0
+    run_json.write_text(json.dumps(meta))
+    with pytest.warns(UserWarning), pytest.raises(ValueError, match="No finished runs for box"):
+        run_import(root, tmp_path, cfd, model0=model0)
+
+
+def test_floor_bound_object_has_no_wand_underground(root, tmp_path):
+    """A model standing on the floor (zmin = 0): wand 0 sits just above it, not at -0.1 H."""
+    cfd = make_cfd(floor="moving")
+    model0 = make_model0()
+    model0.apply_translation((0, 0, 1.0))  # box now spans z in [0, 2]
+    write_fake_result(root, cfd, model0, 4)
+    _, out, _, _ = run_import(root, tmp_path, cfd, model0=model0)
+    heights = read_cache(out)["wand_heights"]
+    assert heights[0] == pytest.approx(0.02 * 2.0) and heights[-1] == pytest.approx(2.0 + 0.2)
+    assert np.all(heights > 0)
 
 
 def test_pressure_follows_rotation(root, tmp_path):
@@ -381,3 +431,29 @@ def test_write_cache_roundtrip(tmp_path):
     c = read_cache(path)
     assert c["format_version"] == 2 and c["a"].dtype == np.float32
     assert json.loads(c["config_json"]) == {"x": 1}
+
+
+# --- final fix wave: command-line import keeps going when one object fails ---
+
+def test_import_results_reports_each_failure_and_continues(tmp_path, monkeypatch, capsys):
+    from solver import import_results
+
+    calls = []
+
+    def fake_import(obj_id, *args, **kwargs):
+        calls.append(obj_id)
+        if obj_id == "airplane":
+            raise KeyError("no such column")  # not a ValueError/OSError: used to abort the whole import
+        return {"imported": [0], "filled": {}, "flagged": []}
+
+    monkeypatch.setattr(import_results, "load_prepared", lambda path, cfd: None)
+    monkeypatch.setattr(import_results, "import_object", fake_import)
+    code = import_results.main(["--root", str(tmp_path), "--out-dir", str(tmp_path / "out")])
+    captured = capsys.readouterr()
+    assert code == 1
+    assert calls == ["airplane", "f1_car", "building", "human"]  # every object was tried
+    assert "airplane: FAILED - KeyError" in captured.err and "no such column" in captured.err
+    assert "f1_car: imported" in captured.out and "human: imported" in captured.out
+
+    calls.clear()
+    assert import_results.main(["--root", str(tmp_path), "--objects", "human", "--out-dir", str(tmp_path / "out")]) == 0

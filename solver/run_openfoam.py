@@ -1,20 +1,22 @@
 """Command-line front end for the OpenFOAM batch runner.
 
-    ./.venv/bin/python solver/run_openfoam.py run --objects airplane f1_car [--preview] [--machine laptop]
+    ./.venv/bin/python solver/run_openfoam.py run --objects airplane f1_car [--preview] [--machine laptop] [--retry-failed]
     ./.venv/bin/python solver/run_openfoam.py stop [--preview]
-    ./.venv/bin/python solver/run_openfoam.py status [--preview]
+    ./.venv/bin/python solver/run_openfoam.py status [--preview] [--machine laptop]
     ./.venv/bin/python solver/run_openfoam.py test --object airplane --direction-index 0 --iterations 60 \
         [--mesh-only] [--coarse]
 
 `run` works through this machine's queue (runs/full or runs/preview, file queue_<machine>.json)
 and can be interrupted with Ctrl-C or `stop`; running the same command again resumes where it
-stopped. Preview = wind directions 0, 4 and 8 only, cap 500 iterations. `test` runs one case in
+stopped. A run that `failed` is skipped until you pass `--retry-failed`, which puts every failed
+run of this machine's queue back to waiting (iterations 0) before the batch starts. Preview = wind directions 0, 4 and 8 only, cap 500 iterations. `test` runs one case in
 runs/test, mainly to check meshing and the pipeline before committing to hours of compute.
 All commands need Docker Desktop to be running.
 """
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -23,10 +25,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from solver.foam.geometry import prepare_model
-from solver.foam.queue import build_queue, load_queue
+from solver.foam.geometry import load_prepared
+from solver.foam.queue import build_queue, load_queue, reset_failed, save_queue
 from solver.foam.runner import (Executor, FoamContainer, RunContext, RunnerError, SubprocessExecutor,
-                                mesh_only, run_batch, run_one, stop_flag)
+                                mesh_only, queue_path, run_batch, run_one, stop_flag)
 from solver.foam.settings import load_settings
 
 DOCKER_DOWN = "Docker Desktop isn't running — open it and try again."
@@ -55,7 +57,7 @@ def _build_context(args, ex: Executor, root: Path, cap: int, obj_ids: list[str],
     unknown = [o for o in obj_ids if o not in objects]
     if unknown:
         sys.exit(f"Unknown object(s) {unknown}; choose from {sorted(objects)}")
-    models = {o: prepare_model(PROJECT_ROOT / "assets" / "models" / o / "model.stl", objects[o]) for o in obj_ids}
+    models = {o: load_prepared(PROJECT_ROOT / "assets" / "models" / o / "model.stl", objects[o]) for o in obj_ids}
     container = FoamContainer(settings, f"navflow-{args.machine}", ex)
     return RunContext(settings, objects, models, root, cap, container, poll_s=poll_s)
 
@@ -63,7 +65,15 @@ def _build_context(args, ex: Executor, root: Path, cap: int, obj_ids: list[str],
 def cmd_run(args, ex: Executor) -> int:
     settings, _, _ = load_settings(PROJECT_ROOT / "config" / "exhibition_config.json")
     cap = settings.preview_iterations if args.preview else settings.max_iterations
-    ctx = _build_context(args, ex, _runs_root(args.preview), cap, args.objects)
+    root = _runs_root(args.preview)
+    ctx = _build_context(args, ex, root, cap, args.objects)
+    if args.retry_failed:
+        qpath = queue_path(root, args.machine)
+        records = load_queue(qpath)
+        reset = reset_failed(records)
+        if reset:
+            save_queue(qpath, records)
+        print(f"Reset {reset} failed run{'' if reset == 1 else 's'} to waiting ({qpath.name}).")
     done = run_batch(args.objects, ctx, args.machine, PREVIEW_DIRECTIONS if args.preview else None)
     for r in done:
         print(f"{r.run_id}: {r.status} ({r.iterations} iterations)")
@@ -80,7 +90,8 @@ def cmd_stop(args, ex: Executor) -> int:
 
 def cmd_status(args, ex: Executor) -> int:
     root = _runs_root(args.preview)
-    files = sorted(root.glob("queue_*.json"))
+    files = [queue_path(root, args.machine)] if args.machine else sorted(root.glob("queue_*.json"))
+    files = [f for f in files if f.exists()]
     if not files:
         print(f"No queue found in {root}")
         return 0
@@ -112,14 +123,18 @@ def make_parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run", parents=[common], help="run or resume this machine's queue")
     run.add_argument("--objects", nargs="+", required=True)
     run.add_argument("--preview", action="store_true", help="directions 0, 4, 8; cap 500; runs/preview")
+    run.add_argument("--retry-failed", action="store_true",
+                     help="put this machine's failed runs back to waiting before the batch starts")
     run.set_defaults(func=cmd_run)
 
-    stop = sub.add_parser("stop", parents=[common], help="ask the running batch to save and stop")
+    stop = sub.add_parser("stop", parents=[common],
+                          help="ask the running batch to save and stop (the flag is per runs folder, so --machine is accepted but not needed)")
     stop.add_argument("--preview", action="store_true")
     stop.set_defaults(func=cmd_stop)
 
-    status = sub.add_parser("status", parents=[common], help="one row per run")
+    status = sub.add_parser("status", help="one row per run (every machine's queue unless --machine is given)")
     status.add_argument("--preview", action="store_true")
+    status.add_argument("--machine", default=None, help="show only this machine's queue (default: all machines)")
     status.set_defaults(func=cmd_status)
 
     test = sub.add_parser("test", parents=[common], help="run a single case in runs/test")
@@ -143,6 +158,11 @@ def main(argv: list[str] | None = None, ex: Executor | None = None) -> int:
         return args.func(args, ex)
     except RunnerError as e:  # the run is left resumable; say why and exit non-zero
         print(f"Stopped: {e}", file=sys.stderr)
+        return 1
+    except subprocess.CalledProcessError as e:  # a docker command failed; nothing was marked failed, run again to resume
+        detail = (e.stderr or "").strip() if isinstance(e.stderr, str) else ""
+        print(f"Stopped: {' '.join(str(a) for a in e.cmd[:4])} ... exited {e.returncode}"
+              f"{': ' + detail if detail else ''}", file=sys.stderr)
         return 1
 
 

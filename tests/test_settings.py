@@ -31,7 +31,7 @@ def test_load_settings_values():
     assert [objs[k].speed_m_s for k in ("airplane", "f1_car", "building", "human")] == [102.0, 40.0, 50.0, 10.0]
     assert all(len(o.directions_deg) == 9 for o in objs.values())
     assert objs["f1_car"].floor == "moving" and objs["building"].floor == "rough" and objs["airplane"].floor == "none"
-    assert objs["airplane"].cruise == {"density_kg_m3": 0.364, "speed_m_s": 250.0}
+    assert objs["airplane"].cruise == {"density_kg_m3": 0.364, "speed_m_s": 250.0, "altitude_km": 11}
     assert objs["airplane"].widgets == ("fuel", "speed") and objs["building"].widgets == ("wind_load",)
 
 
@@ -58,6 +58,9 @@ def test_load_settings_meshing_and_object_details():
     assert "info_card" in next(o for o in raw["objects"] if o["id"] == "building")
     assert raw["controls"]["remote_port"] == 8765 and raw["controls"]["knob_step"] == 0.03125
     assert "wind_tunnel" not in raw and "solver_defaults" not in raw
+    assert set(raw["controls"]) == {"remote_port", "knob_step"}  # the keys themselves are hard-coded in input_controller
+    assert all("baseline_drag_power_kw" not in o for o in raw["objects"])
+    assert "Moving the air jet" not in next(o for o in raw["objects"] if o["id"] == "airplane")["description"]
 
 
 def test_surface_refinement_override(tmp_path):
