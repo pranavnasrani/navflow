@@ -1,0 +1,70 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      blockMeshDict;
+}
+
+// Wind tunnel box, one hex block. Cell size h = D / base_cells_per_size, counts = ceil(extent / h)
+// (IGCSE 0606: division and rounding up to a whole number of cells).
+scale   1;
+
+vertices
+(
+    ($xmin $ymin $zmin)
+    ($xmax $ymin $zmin)
+    ($xmax $ymax $zmin)
+    ($xmin $ymax $zmin)
+    ($xmin $ymin $zmax)
+    ($xmax $ymin $zmax)
+    ($xmax $ymax $zmax)
+    ($xmin $ymax $zmax)
+);
+
+blocks
+(
+    hex (0 1 2 3 4 5 6 7) ($nx $ny $nz) simpleGrading (1 1 1)
+);
+
+edges
+(
+);
+
+boundary
+(
+    inlet
+    {
+        type patch;
+        faces ((0 4 7 3));
+    }
+    outlet
+    {
+        type patch;
+        faces ((1 2 6 5));
+    }
+    sides
+    {
+        type patch;
+        faces
+        (
+            (0 1 5 4)
+            (3 7 6 2)
+        );
+    }
+    top
+    {
+        type patch;
+        faces ((4 5 6 7));
+    }
+    // A real wall (type wall) when the floor has wall functions (moving, rough), else a plain patch.
+    floor
+    {
+        type $floor_type;
+        faces ((0 3 2 1));
+    }
+);
+
+mergePatchPairs
+(
+);

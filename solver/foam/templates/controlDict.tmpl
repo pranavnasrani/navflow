@@ -1,0 +1,101 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      controlDict;
+}
+
+application     simpleFoam;
+
+// atmBoundaryLayer* inlet and atmNutkWallFunction (rough floor, building) live in this library.
+libs            (atmosphericModels);
+
+startFrom       latestTime;
+
+startTime       0;
+
+stopAt          endTime;
+
+endTime         $end_time;
+
+deltaT          1;
+
+writeControl    timeStep;
+
+writeInterval   $write_interval;
+
+purgeWrite      2;
+
+writeFormat     binary;
+
+writePrecision  6;
+
+writeCompression off;
+
+timeFormat      general;
+
+timePrecision   6;
+
+runTimeModifiable true;
+
+functions
+{
+    // Pressure + friction force on the model, every iteration. Task 5 reads postProcessing/forces.
+    forces
+    {
+        type            forces;
+        libs            (forces);
+
+        writeControl    timeStep;
+        writeInterval   1;
+
+        patches         (model);
+        rho             rhoInf;     // incompressible solver: use the constant density rhoInf below
+        rhoInf          $rho;
+        CofR            (0 0 0);
+        log             no;
+    }
+
+    // Moving average of the last $average_window iterations, written with every save.
+    fieldAverage1
+    {
+        type            fieldAverage;
+        libs            (fieldFunctionObjects);
+
+        fields
+        (
+            U
+            {
+                mean        on;
+                prime2Mean  off;
+                base        time;
+                windowType  approximate;
+                window      $average_window;
+                allowRestart no;
+            }
+            p
+            {
+                mean        on;
+                prime2Mean  off;
+                base        time;
+                windowType  approximate;
+                window      $average_window;
+                allowRestart no;
+            }
+            k
+            {
+                mean        on;
+                prime2Mean  off;
+                base        time;
+                windowType  approximate;
+                window      $average_window;
+                allowRestart no;
+            }
+        );
+
+        executeControl  timeStep;
+        executeInterval 1;
+        writeControl    writeTime;
+    }
+}

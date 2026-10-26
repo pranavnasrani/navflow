@@ -65,7 +65,7 @@ SIMPLE
 
 potentialFlow
 {
-    nNonOrthogonalCorrectors 10;
+    nNonOrthogonalCorrectors 5;
 }
 
 relaxationFactors
@@ -77,11 +77,5 @@ relaxationFactors
         omega           0.7;
     }
 }
-
-cache
-{
-    grad(U);
-}
-
 
 // ************************************************************************* //
