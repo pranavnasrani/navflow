@@ -92,20 +92,62 @@ def test_knob_end_points_and_clamp(manager):
 
 
 def test_nearest_lines(manager):
-    near_d2 = manager.get_state(3, _knob_between(manager, 2, 3, 0.2))
-    near_d3 = manager.get_state(3, _knob_between(manager, 2, 3, 0.8))
-    assert near_d2["lines"].shape == near_d3["lines"].shape
-    assert near_d2["lines"].shape[1] == 3
-    assert near_d2["k"].shape[0] == near_d2["lines"].shape[0] == near_d2["dominant"].shape[0]
-    # Fake lines sit at the wand height.
-    z = near_d2["lines"][:, 2]
-    assert np.allclose(z[~np.isnan(z)], manager.wand_heights[3])
-    assert near_d2["wand_z"] == manager.wand_heights[3]
-    # Nearest-direction fields come from a stored direction, not a blend.
-    assert near_d2["metrics"]["converged"] is True
+    # t = 0.4 and t = 0.6 between directions 2 and 3 must pick different directions' lines/k/dominant.
+    lo = manager.get_state(3, _knob_between(manager, 2, 3, 0.4))
+    hi = manager.get_state(3, _knob_between(manager, 2, 3, 0.6))
+    assert lo["lines"].shape[1] == 3
+    assert lo["k"].shape[0] == lo["lines"].shape[0] == lo["dominant"].shape[0]
+    real = ~np.isnan(lo["lines"][:, 0])
+    # Fake lines sit at the wand height, shifted along x by 0.1 * direction index.
+    assert np.allclose(lo["lines"][real, 2], manager.wand_heights[3])
+    assert np.allclose(hi["lines"][real, 0] - lo["lines"][real, 0], 0.1)
+    # k = 10 * d + (0.5..1.5): the integer tens digit identifies the direction.
+    assert int(np.nanmin(lo["k"]) // 10) == 2 and int(np.nanmin(hi["k"]) // 10) == 3
+    # dominant pattern (arange + d) % 3 starts at 2 for d=2 and at 0 for d=3.
+    assert lo["dominant"][0] == 2 and hi["dominant"][0] == 0
+    assert lo["wand_z"] == manager.wand_heights[3]
+    # Exactly on a stored direction (t = 0): that direction.
+    exact = manager.get_state(3, _knob_between(manager, 5, 6, 0.0))
+    assert int(np.nanmin(exact["k"]) // 10) == 5
     # Wand index is clamped to the available wands.
     assert manager.get_state(99, 0.5)["wand_index"] == 9
     assert manager.get_state(-4, 0.5)["wand_index"] == 0
+
+
+def test_filled_and_non_numeric_metrics_come_from_nearest(tmp_path):
+    cfg = {"id": "building", "cfd": {"speed_m_s": 50.0, "widgets": ["wind_load"]}}
+    write_fake_cache(tmp_path / "building_states.npz", cfg)
+    mgr = ObjectStateManager("building", cache_dir=tmp_path)
+    # Direction 3 is the filled run (filled_from = 2); direction 2 is not.
+    near_2 = mgr.get_state(0, _knob_between(mgr, 2, 3, 0.4))
+    near_3 = mgr.get_state(0, _knob_between(mgr, 2, 3, 0.6))
+    assert near_2["filled"] is False and near_2["metrics"]["filled_from"] is None
+    assert near_3["filled"] is True and near_3["metrics"]["filled_from"] == 2
+    # The wind_load list is not blended: it is the nearest direction's list, unchanged.
+    assert near_2["metrics"]["wind_load"][0]["label"] == "Breeze d2"
+    assert near_3["metrics"]["wind_load"][0]["label"] == "Breeze d3"
+    assert near_3["metrics"]["wind_load"][0]["force_n"] == 3.0
+    # Numbers in the same metrics dict are still blended (drag force is 100 + d).
+    assert np.isclose(near_3["metrics"]["drag_force_n"], 100.0 + 2 + 0.6)
+
+
+def test_lookup_under_1ms_real_size(tmp_path):
+    # ~200k surface vertices, 5 lines x 20,001 rows = ~100k points per wand, 9 directions x 2 wands.
+    cfg = _object_config("f1_car")
+    write_fake_cache(tmp_path / "f1_car_states.npz", cfg, n_wand=2, n_vertices=200_000, points_per_line=20_000)
+    mgr = ObjectStateManager("f1_car", cache_dir=tmp_path)
+    assert len(mgr.mesh_vertices) == 200_000
+    assert len(mgr.get_state(1, 0.3)["lines"]) == 5 * 20_001
+    knob = _knob_between(mgr, 2, 3)
+    mgr.get_state(1, knob)  # warm-up
+    times = []
+    for _ in range(200):
+        t0 = time.perf_counter()
+        mgr.get_state(1, knob)
+        times.append((time.perf_counter() - t0) * 1000.0)
+    median_ms = float(np.median(times))
+    print(f" -> real-size median state lookup: {median_ms:.3f} ms (target < 1.0 ms)")
+    assert median_ms < 1.0
 
 
 def test_rejects_v1_cache(tmp_path):
