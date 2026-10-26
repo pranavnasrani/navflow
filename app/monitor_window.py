@@ -1,377 +1,559 @@
 """
-Monitor Window: Native PySide6 + PyVista 3D Visualization and Scientific HUD.
-Renders 3D object mesh colored by surface pressure, moving circular pipe nozzle,
-animated flow streamlines, and live Navier-Stokes & Sustainability telemetry.
+Monitor Window: native PySide6 + PyVista 3D view and scientific HUD for one exhibition object.
+
+One window per object (airplane, F1 car, tower, human). All four share a single
+ExhibitionInputController, so a button press or knob turn on the macropad updates every screen.
+
+The visitor controls
+    * the smoke wand: 10 heights (the macropad buttons) - a thin rod across y that releases streamlines;
+    * the wind direction: a rotary knob mapped onto the object's direction sweep (angle of attack,
+      yaw, wind angle ...). The wind arrow in the 3D scene turns with it;
+    * the view (Tab): 0 airflow + surface pressure, 1 which Navier-Stokes term dominates each streamline,
+      2 turbulence energy k.
+The wind speed is fixed per object (it is what OpenFOAM solved), and is shown as such.
+
+Maths link (IGCSE 0606): the camera is aimed at the midpoint of the display box, ((min + max) / 2 on each
+axis, coordinate geometry); the wind arrow is a 3D vector (direction cosines of the wind in the model
+frame); the tracer dots slide along the lines by linear interpolation; the bars are logarithmic.
 """
+
+from __future__ import annotations
 
 import numpy as np
 import pyvista as pv
+from PySide6.QtCore import QEvent, Qt, QTimer
+from PySide6.QtGui import QKeyEvent, QWheelEvent
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QMainWindow, QSizePolicy, QVBoxLayout, QWidget
 from pyvistaqt import QtInteractor
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QFont, QKeyEvent, QWheelEvent
-from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
-    QLabel, QFrame, QProgressBar, QSizePolicy
-)
 
-from app.state_manager import ObjectStateManager
+from app.hud_widgets import (
+    TERM_COLORS,
+    TERM_NAMES,
+    ColorBar,
+    NsTermsPanel,
+    SustainabilityOverlay,
+    TermLegend,
+    hex_to_rgb,
+    line_runs,
+    particles_on_lines,
+    polyline_from_nan_joined,
+)
 from app.input_controller import ExhibitionInputController
+from app.state_manager import ObjectStateManager
+
+VIEW_NAMES = (
+    "VIEW 1/3 · Airflow and surface pressure",
+    "VIEW 2/3 · Dominant Navier–Stokes term",
+    "VIEW 3/3 · Turbulence energy k",
+)
+PRESSURE_TITLE = "Surface pressure p (Pa)"
+K_TITLE = "Turbulence energy k (m²/s²) · k-ω SST"
+MODEL_GREY = "#8D99AE"
+ANIM_INTERVAL_MS = 33  # about 30 frames per second; four windows share one GPU
+HUD_MIN_WIDTH, HUD_MAX_WIDTH = 330, 440
+COMPACT_HEIGHT = 820  # below this window height the long explanatory texts are hidden so nothing is squeezed
+PHASE_PER_FRAME = 0.006  # fraction of a streamline the tracers advance per frame (a lap takes about 5.5 s)
+
+
+def _unit(v: np.ndarray) -> np.ndarray:
+    n = float(np.linalg.norm(v))
+    return v / n if n > 0.0 else np.array([1.0, 0.0, 0.0])
 
 
 class MonitorWindow(QMainWindow):
-    def __init__(self,
-                 obj_id: str,
-                 input_controller: ExhibitionInputController,
-                 cache_dir: str = "assets/cache",
-                 parent=None):
+    def __init__(
+        self,
+        obj_id: str,
+        input_controller: ExhibitionInputController,
+        cache_dir: str = "assets/cache",
+        remote_url: str | None = None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.obj_id = obj_id
         self.controller = input_controller
+        self.remote_url = remote_url
         self.state_mgr = ObjectStateManager(obj_id=obj_id, cache_dir=cache_dir)
         self.obj_cfg = self.state_mgr.obj_config
+        self.cfd_cfg = self.obj_cfg.get("cfd", {})
+        self.view_bounds = np.asarray(self.state_mgr.view_bounds, dtype=float)
 
-        self.setWindowTitle(f"Monitor {self.obj_cfg.get('monitor_index', 0) + 1}: {self.obj_cfg['display_name']} — Navier-Stokes CFD")
+        self.setWindowTitle(
+            f"Monitor {self.obj_cfg.get('monitor_index', 0) + 1}: {self.obj_cfg['display_name']} — Navier-Stokes CFD"
+        )
         self.resize(1280, 800)
+        self.setFocusPolicy(Qt.StrongFocus)
 
-        # Connect global controller signal
-        self.controller.state_changed.connect(self.on_state_changed)
-
-        # 3D Animation state
+        # Animation state
         self.anim_phase = 0.0
-        self.streamline_points_cache = None
-        self.mesh_actor = None
-        self.nozzle_actor = None
-        self.streamline_actor = None
-        self.particles_actor = None
+        self._line_points = np.empty((0, 3))
+        self._run_starts = np.empty(0, dtype=int)
+        self._run_lengths = np.empty(0, dtype=int)
 
         self._build_ui()
         self._setup_3d_scene()
 
-        # Animation timer (60 FPS) for flowing particles
+        # Every key/wheel event that lands on the 3D widget goes through the controller first.
+        self.plotter.installEventFilter(self)
+
+        self.controller.state_changed.connect(self.on_state_changed)
+        self.controller.view_changed.connect(self.on_view_changed)
+
         self.anim_timer = QTimer(self)
         self.anim_timer.timeout.connect(self._animate_flow)
-        self.anim_timer.start(16)  # ~60 FPS
+        self.anim_timer.start(ANIM_INTERVAL_MS)
 
-        # Initial render
-        self.update_view(self.controller.current_z_index, self.controller.current_wind_speed)
+        self.update_view(self.controller.current_wand_index, self.controller.current_knob)
+        self.on_view_changed(self.controller.current_view)
 
-    def _build_ui(self):
-        """Constructs the high-contrast dark-mode aerospace UI layout."""
-        central_widget = QWidget(self)
-        self.setCentralWidget(central_widget)
-        central_widget.setStyleSheet("background-color: #0A0E17; color: #FFFFFF;")
-
-        main_layout = QHBoxLayout(central_widget)
+    # ------------------------------------------------------------------------------------------
+    # UI
+    # ------------------------------------------------------------------------------------------
+    def _build_ui(self) -> None:
+        central = QWidget(self)
+        self.setCentralWidget(central)
+        central.setStyleSheet("background-color: #0A0E17; color: #F1F5F9;")
+        main_layout = QHBoxLayout(central)
         main_layout.setContentsMargins(12, 12, 12, 12)
         main_layout.setSpacing(14)
 
-        # Left: PyVista 3D Interactor Viewport
+        # Left: the 3D view, with the sustainability cards floating over its top-left corner.
         self.plotter = QtInteractor(self)
         self.plotter.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.plotter.setFocusPolicy(Qt.StrongFocus)
         main_layout.addWidget(self.plotter, stretch=7)
 
-        # Right: Scientific HUD Dashboard
-        hud_panel = QFrame()
-        hud_panel.setFixedWidth(420)
-        hud_panel.setStyleSheet("""
-            QFrame {
-                background-color: #121826;
-                border: 1px solid #1F293D;
-                border-radius: 8px;
-            }
-            QLabel {
-                border: none;
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
-            }
-        """)
-        hud_layout = QVBoxLayout(hud_panel)
-        hud_layout.setContentsMargins(18, 18, 18, 18)
-        hud_layout.setSpacing(12)
+        self.overlay = SustainabilityOverlay(tuple(self.cfd_cfg.get("widgets", ())), self.plotter)
+        self.overlay.move(14, 14)
+        self.overlay.adjustSize()
+        self.overlay.raise_()
+
+        # Colour bars and the term legend are Qt widgets too: VTK's own scalar bars have no Greek letters.
+        self.pressure_bar = ColorBar(PRESSURE_TITLE, "turbo", log=False, parent=self.plotter)
+        self.k_bar = ColorBar(K_TITLE, "plasma", log=True, parent=self.plotter)
+        self.term_legend = TermLegend(self.plotter)
+        for w in (self.pressure_bar, self.k_bar, self.term_legend):
+            w.hide()
+
+        # Right: HUD
+        hud = QFrame()
+        self.hud = hud
+        hud.setFixedWidth(HUD_MAX_WIDTH)
+        hud.setStyleSheet(
+            "QFrame#hud { background-color: #121826; border: 1px solid #1F293D; border-radius: 8px; }"
+            "QLabel { border: none; background: transparent; }"
+        )
+        hud.setObjectName("hud")
+        lay = QVBoxLayout(hud)
+        self.hud_layout = lay
+        lay.setContentsMargins(16, 14, 16, 12)
+        lay.setSpacing(8)
 
         accent = self.obj_cfg.get("color", "#00E5FF")
 
-        # 1. Header Card
-        lbl_category = QLabel(self.obj_cfg.get("category", "Fluid Dynamics").upper())
-        lbl_category.setStyleSheet(f"color: {accent}; font-size: 11px; font-weight: 700; letter-spacing: 2px;")
-        hud_layout.addWidget(lbl_category)
+        category = QLabel(self.obj_cfg.get("category", "Fluid Dynamics").upper())
+        category.setStyleSheet(f"color: {accent}; font-size: 12px; font-weight: 800; letter-spacing: 2px;")
+        lay.addWidget(category)
+        title = QLabel(self.obj_cfg.get("display_name", "Object"))
+        title.setStyleSheet("font-size: 24px; font-weight: 800; color: #FFFFFF;")
+        title.setWordWrap(True)
+        lay.addWidget(title)
+        rule = QFrame()
+        rule.setFixedHeight(2)
+        rule.setStyleSheet(f"background-color: {accent}; border: none;")
+        lay.addWidget(rule)
 
-        lbl_title = QLabel(self.obj_cfg.get("display_name", "Object"))
-        lbl_title.setStyleSheet("font-size: 24px; font-weight: 800; color: #FFFFFF;")
-        hud_layout.addWidget(lbl_title)
+        # Controls readout
+        controls = QFrame()
+        controls.setObjectName("controls")
+        controls.setStyleSheet("QFrame#controls { background-color: #1A2333; border-radius: 6px; }")
+        cl = QVBoxLayout(controls)
+        cl.setContentsMargins(12, 8, 12, 8)
+        cl.setSpacing(4)
+        label_style = "font-size: 15px; font-weight: 700; color: #F1F5F9;"
+        self.lbl_wand = QLabel("")
+        self.lbl_direction = QLabel("")
+        self.lbl_speed = QLabel("")
+        for lb in (self.lbl_wand, self.lbl_direction, self.lbl_speed):
+            lb.setStyleSheet(label_style)
+            cl.addWidget(lb)
+        lay.addWidget(controls)
 
-        separator = QFrame()
-        separator.setFrameShape(QFrame.HLine)
-        separator.setStyleSheet(f"background-color: {accent}; max-height: 2px; border: none;")
-        hud_layout.addWidget(separator)
+        # View name
+        self.lbl_view = QLabel("")
+        self.lbl_view.setStyleSheet(f"font-size: 13px; font-weight: 800; color: {accent};")
+        self.lbl_view.setWordWrap(True)
+        lay.addWidget(self.lbl_view)
 
-        # 2. Live Hardware Inputs (Z-Height & Wind Velocity)
-        input_box = QFrame()
-        input_box.setStyleSheet("background-color: #1A2333; border-radius: 6px; padding: 10px;")
-        ib_layout = QVBoxLayout(input_box)
-        ib_layout.setSpacing(8)
+        # Navier-Stokes bars
+        self.ns_panel = NsTermsPanel()
+        lay.addWidget(self.ns_panel)
 
-        self.lbl_z_status = QLabel("PIPE NOZZLE: Step 5 / 10 (Z = 0.45 m)")
-        self.lbl_z_status.setStyleSheet("font-size: 13px; font-weight: 600; color: #E2E8F0;")
-        ib_layout.addWidget(self.lbl_z_status)
+        # Telemetry
+        tele = QFrame()
+        tele.setObjectName("tele")
+        tele.setStyleSheet("QFrame#tele { background-color: #161F30; border-radius: 6px; }")
+        tl = QVBoxLayout(tele)
+        tl.setContentsMargins(12, 8, 12, 8)
+        tl.setSpacing(3)
+        self.lbl_re = QLabel("")
+        self.lbl_forces = QLabel("")
+        self.lbl_coeffs = QLabel("")
+        self.lbl_power = QLabel("")
+        self.lbl_run = QLabel("")
+        for lb, style in (
+            (self.lbl_re, "font-size: 13px; color: #E2E8F0;"),
+            (self.lbl_forces, "font-size: 14px; font-weight: 700; color: #FF8A80;"),
+            (self.lbl_coeffs, "font-size: 13px; color: #E2E8F0;"),
+            (self.lbl_power, "font-size: 14px; font-weight: 700; color: #FFD740;"),
+            (self.lbl_run, "font-size: 11px; color: #AAB6C8;"),
+        ):
+            lb.setStyleSheet(style)
+            lb.setWordWrap(True)
+            tl.addWidget(lb)
+        lay.addWidget(tele)
 
-        self.bar_z = QProgressBar()
-        self.bar_z.setRange(1, 10)
-        self.bar_z.setValue(5)
-        self.bar_z.setTextVisible(False)
-        self.bar_z.setStyleSheet(f"""
-            QProgressBar {{ background-color: #0A0E17; border-radius: 3px; max-height: 8px; border: none; }}
-            QProgressBar::chunk {{ background-color: {accent}; border-radius: 3px; }}
-        """)
-        ib_layout.addWidget(self.bar_z)
+        # Honest note when this direction was copied from the nearest simulated one
+        self.lbl_filled = QLabel("")
+        self.lbl_filled.setWordWrap(True)
+        self.lbl_filled.setStyleSheet(
+            "font-size: 12px; font-weight: 700; color: #FFD740; background-color: #3A2F0B;"
+            "border-radius: 4px; padding: 4px 8px;"
+        )
+        self.lbl_filled.hide()
+        lay.addWidget(self.lbl_filled)
 
-        self.lbl_v_status = QLabel("WIND VELOCITY: 30.0 m/s (108.0 km/h)")
-        self.lbl_v_status.setStyleSheet("font-size: 13px; font-weight: 600; color: #E2E8F0;")
-        ib_layout.addWidget(self.lbl_v_status)
+        # Building info card (earthquake / tsunami scope note)
+        self.lbl_info = QLabel(self.obj_cfg.get("info_card", ""))
+        self.lbl_info.setWordWrap(True)
+        self.lbl_info.setStyleSheet(
+            "font-size: 12px; color: #E2E8F0; background-color: #1F2A44; border-radius: 6px; padding: 8px;"
+        )
+        self.lbl_info.setVisible(bool(self.obj_cfg.get("info_card")))
+        lay.addWidget(self.lbl_info)
 
-        self.bar_v = QProgressBar()
-        self.bar_v.setRange(10, 50)
-        self.bar_v.setValue(30)
-        self.bar_v.setTextVisible(False)
-        self.bar_v.setStyleSheet("""
-            QProgressBar { background-color: #0A0E17; border-radius: 3px; max-height: 8px; border: none; }
-            QProgressBar::chunk { background-color: #FF9100; border-radius: 3px; }
-        """)
-        ib_layout.addWidget(self.bar_v)
+        desc = QLabel(self.obj_cfg.get("description", ""))
+        self.lbl_desc = desc
+        desc.setWordWrap(True)
+        desc.setStyleSheet("font-size: 11px; color: #AAB6C8;")
+        lay.addWidget(desc)
 
-        hud_layout.addWidget(input_box)
+        lay.addStretch()
 
-        # 3. Navier-Stokes Calculus & Math Telemetry Card
-        math_box = QFrame()
-        math_box.setStyleSheet("background-color: #161F30; border-radius: 6px; padding: 10px;")
-        mb_layout = QVBoxLayout(math_box)
-        mb_layout.setSpacing(6)
+        footer_text = "Buttons 1–0: smoke wand · Knob: wind direction · Tab: change view"
+        if self.remote_url:
+            footer_text += f"\nRemote control: {self.remote_url}"
+        footer = QLabel(footer_text)
+        footer.setWordWrap(True)
+        footer.setStyleSheet("font-size: 11px; color: #8A98AE; font-weight: 600;")
+        lay.addWidget(footer)
 
-        lbl_math_hdr = QLabel("NAVIER-STOKES CALCULUS HUD")
-        lbl_math_hdr.setStyleSheet("font-size: 11px; font-weight: 700; color: #64B5F6; letter-spacing: 1px;")
-        mb_layout.addWidget(lbl_math_hdr)
+        main_layout.addWidget(hud, stretch=3)
 
-        lbl_pde = QLabel("ρ[∂v/∂t + (v·∇)v] = -∇p + μ∇²v")
-        lbl_pde.setStyleSheet("font-size: 12px; font-family: monospace; color: #90CAF9; background-color: #0D131F; padding: 4px; border-radius: 4px;")
-        mb_layout.addWidget(lbl_pde)
+    # ------------------------------------------------------------------------------------------
+    # 3D scene
+    # ------------------------------------------------------------------------------------------
+    def _setup_3d_scene(self) -> None:
+        pl = self.plotter
+        pl.set_background("#060A10")
+        pl.show_axes()
 
-        self.lbl_reynolds = QLabel("Reynolds Number Re: 2.45 × 10⁶")
-        self.lbl_reynolds.setStyleSheet("font-size: 13px; color: #CFD8DC;")
-        mb_layout.addWidget(self.lbl_reynolds)
+        b = self.view_bounds
+        centre = (b[0::2] + b[1::2]) / 2.0  # midpoint on each axis
+        self._box_centre = centre
+        self._box_size = b[1::2] - b[0::2]
 
-        self.lbl_drag_force = QLabel("Aerodynamic Drag F_drag: 142.3 N")
-        self.lbl_drag_force.setStyleSheet("font-size: 13px; font-weight: 700; color: #FF5252;")
-        mb_layout.addWidget(self.lbl_drag_force)
+        # Wireframe of the display box (the region the streamlines are drawn in)
+        pl.add_mesh(pv.Box(bounds=tuple(b)), color="#2B3A55", style="wireframe", line_width=1.5, opacity=0.6)
 
-        self.lbl_lift_force = QLabel("Aerodynamic Lift F_lift: +18.2 N")
-        self.lbl_lift_force.setStyleSheet("font-size: 13px; color: #B0BEC5;")
-        mb_layout.addWidget(self.lbl_lift_force)
-
-        self.lbl_cd = QLabel("Drag Coefficient C_d: 0.38")
-        self.lbl_cd.setStyleSheet("font-size: 13px; color: #CFD8DC;")
-        mb_layout.addWidget(self.lbl_cd)
-
-        self.lbl_pressure_peak = QLabel("Stagnation Pressure Δp: 551.2 Pa")
-        self.lbl_pressure_peak.setStyleSheet("font-size: 13px; color: #CFD8DC;")
-        mb_layout.addWidget(self.lbl_pressure_peak)
-
-        hud_layout.addWidget(math_box)
-
-        # 4. Sustainability & Efficiency Card
-        sust_box = QFrame()
-        sust_box.setStyleSheet("background-color: #13241C; border: 1px solid #1B4D3E; border-radius: 6px; padding: 10px;")
-        sb_layout = QVBoxLayout(sust_box)
-        sb_layout.setSpacing(6)
-
-        lbl_sust_hdr = QLabel("SUSTAINABILITY & EFFICIENCY IMPACT")
-        lbl_sust_hdr.setStyleSheet("font-size: 11px; font-weight: 700; color: #69F0AE; letter-spacing: 1px;")
-        sb_layout.addWidget(lbl_sust_hdr)
-
-        self.lbl_power_cubic = QLabel("Drag Power P = ½ρCdA·V³: 4.27 kW")
-        self.lbl_power_cubic.setStyleSheet("font-size: 13px; font-weight: 700; color: #FFD740;")
-        sb_layout.addWidget(self.lbl_power_cubic)
-
-        self.lbl_fuel_burn = QLabel("Energy / Fuel Consumption: 1.28 L/h")
-        self.lbl_fuel_burn.setStyleSheet("font-size: 13px; color: #E8F5E9;")
-        sb_layout.addWidget(self.lbl_fuel_burn)
-
-        self.lbl_co2_savings = QLabel("CO₂ Saved vs Baseline: +3.8 kg/h")
-        self.lbl_co2_savings.setStyleSheet("font-size: 13px; font-weight: 700; color: #69F0AE;")
-        sb_layout.addWidget(self.lbl_co2_savings)
-
-        self.lbl_eff_gain = QLabel("Efficiency Gain: +28.4%")
-        self.lbl_eff_gain.setStyleSheet("font-size: 13px; font-weight: 700; color: #B9F6CA;")
-        sb_layout.addWidget(self.lbl_eff_gain)
-
-        hud_layout.addWidget(sust_box)
-
-        # 5. Explanatory Note
-        self.lbl_didactic = QLabel(self.obj_cfg.get("description", ""))
-        self.lbl_didactic.setWordWrap(True)
-        self.lbl_didactic.setStyleSheet("font-size: 11px; color: #94A3B8; line-height: 1.4;")
-        hud_layout.addWidget(self.lbl_didactic)
-
-        hud_layout.addStretch()
-
-        # Instructions / Macropad reminder
-        lbl_footer = QLabel("Controls: 10 Buttons for Z-Height (1-0) | Knob for Wind Speed (+ / -)")
-        lbl_footer.setStyleSheet("font-size: 10px; color: #64748B; font-weight: 600;")
-        hud_layout.addWidget(lbl_footer)
-
-        main_layout.addWidget(hud_panel, stretch=3)
-
-    def _setup_3d_scene(self):
-        """Initializes the PyVista 3D scene (lighting, camera, wind tunnel bounding box)."""
-        self.plotter.set_background("#060A10")
-        self.plotter.show_axes()
-
-        # Draw Wind Tunnel Outline Wireframe Box: [0, 2.0] x [0, 1.0] x [0, 1.0]
-        tunnel_box = pv.Box(bounds=(0.0, 2.0, 0.0, 1.0, 0.0, 1.0))
-        self.plotter.add_mesh(tunnel_box, color="#1E293B", style="wireframe", line_width=1.5, opacity=0.4)
-
-        # Base 3D Model PolyData
-        v = self.state_mgr.mesh_vertices
-        f = self.state_mgr.mesh_faces
-        # Format faces for PyVista: [3, v0, v1, v2, 3, v3, v4, v5, ...]
-        pv_faces = np.column_stack([np.full(len(f), 3), f]).ravel()
-        self.mesh_poly = pv.PolyData(v, pv_faces)
-        self.mesh_poly.point_data["Pressure (Pa)"] = np.zeros(len(v), dtype=np.float32)
-
-        # Add 3D model mesh with scientific pressure colormap
-        self.mesh_actor = self.plotter.add_mesh(
+        # The model, coloured by surface pressure in view 0 and plain grey in views 1 and 2
+        v, f = self.state_mgr.mesh_vertices, self.state_mgr.mesh_faces
+        faces = np.column_stack([np.full(len(f), 3), f]).ravel()
+        self.mesh_poly = pv.PolyData(np.asarray(v, dtype=np.float32), faces)
+        self.mesh_poly.point_data[PRESSURE_TITLE] = np.zeros(len(v), dtype=np.float32)
+        self.mesh_actor = pl.add_mesh(
             self.mesh_poly,
-            scalars="Pressure (Pa)",
+            scalars=PRESSURE_TITLE,
             cmap="turbo",
             smooth_shading=True,
-            show_scalar_bar=True,
-            scalar_bar_args={
-                "title": "Surface Pressure p (Pa)",
-                "color": "#FFFFFF",
-                "vertical": False,
-                "position_x": 0.25,
-                "position_y": 0.04,
-                "width": 0.5,
-                "height": 0.06
-            }
+            show_scalar_bar=False,
         )
 
-        # 3D Moving Circular Pipe Nozzle Indicator
-        # Pipe ring at inlet face x=0, pointing along X-axis
-        pipe_cylinder = pv.Cylinder(center=(0.05, 0.5, 0.5), direction=(1, 0, 0), radius=0.08, height=0.10, resolution=32)
-        self.nozzle_actor = self.plotter.add_mesh(
-            pipe_cylinder,
-            color=self.obj_cfg.get("color", "#00E5FF"),
-            opacity=0.85,
-            smooth_shading=True
+        # Streamlines: one shared PolyData, three actors (cyan / by dominant term / by k)
+        dummy = polyline_from_nan_joined(
+            np.array([[b[0], b[2], b[4]], [b[1], b[3], b[5]]]),
+            {"k": np.array([1.0, 2.0]), "dominant_rgb": np.zeros((2, 3), dtype=np.uint8)},
         )
-
-        # Set default isometric camera view
-        self.plotter.camera_position = [
-            (2.9, -1.2, 1.8),   # Eye
-            (1.0, 0.5, 0.5),    # Focal point (tunnel center)
-            (0.0, 0.0, 1.0)     # Up vector
+        self.lines_poly = dummy
+        self.line_actors = [
+            pl.add_mesh(self.lines_poly, color="#00E5FF", line_width=3, opacity=0.8, name="lines_cyan"),
+            pl.add_mesh(
+                self.lines_poly, scalars="dominant_rgb", rgb=True, line_width=3.5, opacity=0.95,
+                name="lines_dominant", show_scalar_bar=False,
+            ),
+            pl.add_mesh(
+                self.lines_poly, scalars="k", cmap="plasma", log_scale=True, clim=(1e-2, 1e2), line_width=3.5,
+                opacity=0.95, name="lines_k", show_scalar_bar=False,
+            ),
         ]
 
-    def on_state_changed(self, z_idx: int, speed: float):
-        """Slot invoked whenever any macropad key or knob is adjusted."""
-        self.update_view(z_idx, speed)
+        # Flow tracer dots
+        self.particles_poly = pv.PolyData(np.zeros((1, 3), dtype=np.float32))
+        pl.add_mesh(
+            self.particles_poly, color="#FFFFFF", point_size=8, render_points_as_spheres=True, opacity=0.95,
+            name="particles",
+        )
 
-    def update_view(self, z_idx: int, speed: float):
-        """Loads interpolated CFD state and updates 3D mesh and HUD readouts."""
-        state = self.state_mgr.get_state(z_step_index=z_idx, wind_speed=speed)
-        pz = state["z_val"]
-        ws = state["wind_speed"]
+        self._fit_camera()
+
+    def _fit_camera(self) -> None:
+        """Aim at the box midpoint from the upstream side, above, then zoom so the whole box fits the view."""
+        centre = self._box_centre
+        diag = float(np.linalg.norm(self._box_size))
+        eye = centre + diag * np.array([-0.30, -0.80, 0.40])
+        self.plotter.camera_position = [tuple(eye), tuple(centre), (0.0, 0.0, 1.0)]
+        self.plotter.reset_camera(bounds=tuple(self.view_bounds))
+        self.plotter.camera.zoom(0.9)  # a little air around the box
+
+    def _wind_arrow(self, wind_vector: np.ndarray) -> pv.PolyData:
+        """Arrow at the upstream edge of the display box, pointing along the wind.
+
+        Start from the model centre and walk back against the wind until the ray leaves the box:
+        P = C - s d, where d is the unit wind vector and s the smallest positive value that puts one
+        coordinate on a face of the box (s_i = distance to that face / |d_i|).
+        """
+        d = _unit(np.asarray(wind_vector, dtype=float))
+        v = np.asarray(self.state_mgr.mesh_vertices, dtype=float)
+        c = (v.min(axis=0) + v.max(axis=0)) / 2.0
+        lo, hi = self.view_bounds[0::2], self.view_bounds[1::2]
+        s = np.inf
+        for i in range(3):
+            if abs(d[i]) > 1e-9:
+                face = lo[i] if d[i] > 0 else hi[i]  # walking against the wind: toward the low face if d_i > 0
+                s = min(s, (c[i] - face) / abs(d[i]))
+        length = 0.2 * float(self._box_size.max())
+        if not np.isfinite(s):
+            s = 0.0
+        start = c - 0.97 * s * d
+        # keep the whole arrow inside the box: if the upstream room is shorter than the arrow, shrink it
+        length = min(length, max(0.97 * s, 1e-6))
+        return pv.Arrow(start=start, direction=d, scale=length, tip_length=0.35, tip_radius=0.14, shaft_radius=0.05)
+
+    def _wand_rod(self, lines: np.ndarray, z: float) -> pv.PolyData:
+        """Thin rod across the wand's seed points (the first point of every streamline)."""
+        pts = np.asarray(lines, dtype=float).reshape(-1, 3)
+        valid = np.isfinite(pts).all(axis=1)
+        prev_nan = np.concatenate([[True], ~valid[:-1]])
+        seeds = pts[valid & prev_nan]
+        b = self.view_bounds
+        if len(seeds) >= 2:
+            ext = seeds.max(axis=0) - seeds.min(axis=0)
+            axis = int(np.argmax(ext))
+            a, e = seeds[np.argmin(seeds[:, axis])], seeds[np.argmax(seeds[:, axis])]
+        else:  # no streamlines: a rod across y at the box's upstream end
+            a = np.array([b[0] + 0.05 * (b[1] - b[0]), b[2], z])
+            e = np.array([b[0] + 0.05 * (b[1] - b[0]), b[3], z])
+        radius = 0.007 * float(self._box_size.max())
+        return pv.Line(a, e).tube(radius=radius)
+
+    # ------------------------------------------------------------------------------------------
+    # Updates
+    # ------------------------------------------------------------------------------------------
+    def on_state_changed(self, wand_index: int, knob: float) -> None:
+        self.update_view(wand_index, knob)
+
+    def update_view(self, wand_index: int, knob: float) -> None:
+        """Look up the state for (wand, knob) in RAM and push it to the 3D scene and the HUD."""
+        state = self.state_mgr.get_state(wand_index, knob)
         metrics = state["metrics"]
 
-        # 1. Update 3D Surface Pressure on Model
-        self.mesh_poly.point_data["Pressure (Pa)"] = state["surface_pressure"]
+        # 1. Surface pressure on the model (1st..99th percentile, so one spike does not wash out the colours)
+        p = np.asarray(state["surface_pressure"], dtype=np.float32)
+        self.mesh_poly.point_data[PRESSURE_TITLE] = p
+        if p.size:
+            lo, hi = np.percentile(p, [1, 99])
+            if hi - lo < 1e-9:
+                lo, hi = lo - 1.0, hi + 1.0
+            self.mesh_actor.mapper.scalar_range = (float(lo), float(hi))
+            self.pressure_bar.set_range(float(lo), float(hi))
 
-        # 2. Update 3D Circular Pipe Nozzle Position along Z
-        if self.nozzle_actor is not None:
-            self.plotter.remove_actor(self.nozzle_actor)
-            new_pipe = pv.Cylinder(center=(0.05, 0.5, pz), direction=(1, 0, 0), radius=0.08, height=0.10, resolution=32)
-            self.nozzle_actor = self.plotter.add_mesh(
-                new_pipe,
-                color=self.obj_cfg.get("color", "#00E5FF"),
-                opacity=0.9,
-                smooth_shading=True
-            )
+        # 2. Streamlines, clipped to the display box. Dominant term -> a fixed colour per term.
+        dom = np.asarray(state["dominant"])
+        palette = np.array([hex_to_rgb(TERM_COLORS[n]) for n in TERM_NAMES] + [(255, 255, 255)], dtype=np.uint8)
+        rgb = palette[np.where(dom >= 0, dom, 3)] if len(dom) else np.zeros((0, 3), dtype=np.uint8)
+        poly = polyline_from_nan_joined(
+            state["lines"], {"k": state["k"], "dominant_rgb": rgb}, bounds=self.view_bounds
+        )
+        self.lines_poly.copy_from(poly)
+        self._line_points = np.asarray(poly.points, dtype=float)
+        self._run_starts, self._run_lengths = line_runs(poly) if poly.n_lines else (np.empty(0, int), np.empty(0, int))
+        if poly.n_points:
+            k = np.asarray(poly.point_data["k"], dtype=float)
+            k = k[np.isfinite(k) & (k > 0)]
+            if k.size:
+                k_lo = max(float(np.percentile(k, 2)), 1e-8)
+                k_hi = max(float(np.percentile(k, 99.5)), k_lo * 10.0)  # log scale needs 0 < lo < hi
+                self.line_actors[2].mapper.scalar_range = (k_lo, k_hi)
+                self.k_bar.set_range(k_lo, k_hi)
 
-        # 3. Update 3D Streamlines
-        streamline_data = state["streamlines"]
-        self.streamline_points_cache = streamline_data
+        # 3. Wind arrow and the wand rod
+        self.plotter.add_mesh(
+            self._wind_arrow(state["wind_vector"]), color="#FF9100", name="wind_arrow", smooth_shading=True
+        )
+        self.plotter.add_mesh(
+            self._wand_rod(state["lines"], state["wand_z"]), color="#FFFFFF",
+            name="wand_rod", smooth_shading=True,
+        )
 
-        if self.streamline_actor is not None:
-            self.plotter.remove_actor(self.streamline_actor)
+        # 4. HUD
+        n_wand = len(self.state_mgr.wand_heights)
+        self.lbl_wand.setText(f"SMOKE WAND: step {state['wand_index'] + 1}/{n_wand} (z = {state['wand_z']:.2f} m)")
+        self.lbl_direction.setText(
+            f"{self.cfd_cfg.get('direction_label', 'Wind direction')}: {state['direction_deg']:.1f}°"
+        )
+        self.lbl_speed.setText(f"WIND SPEED: {state['wind_speed']:.0f} m/s (fixed)")
 
-        if len(streamline_data) > 0:
-            lines_poly = pv.PolyData(streamline_data)
-            self.streamline_actor = self.plotter.add_mesh(
-                lines_poly,
-                color="#00E5FF",
-                line_width=2.5,
-                opacity=0.65
-            )
+        self.ns_panel.set_terms(state["ns_terms"])
 
-        # 4. Update HUD Text & Indicators
-        self.lbl_z_status.setText(f"PIPE NOZZLE: Step {z_idx + 1} / {len(self.state_mgr.z_steps)} (Z = {pz:.2f} m)")
-        self.bar_z.setValue(z_idx + 1)
+        def m(key: str) -> float:
+            v = metrics.get(key, 0.0)
+            return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else 0.0
 
-        speed_kmh = ws * 3.6
-        self.lbl_v_status.setText(f"WIND VELOCITY: {ws:.1f} m/s ({speed_kmh:.1f} km/h)")
-        self.bar_v.setValue(int(ws))
+        self.lbl_re.setText(f"Reynolds number Re = VD/ν = {m('reynolds_number'):.3g}")
+        self.lbl_forces.setText(f"Drag {m('drag_force_n'):,.0f} N   ·   Lift {m('lift_force_n'):+,.0f} N")
+        self.lbl_coeffs.setText(
+            f"Cd = {m('drag_coefficient_cd'):.3f}   Cl = {m('lift_coefficient_cl'):+.3f}   "
+            f"A = {m('frontal_area_m2'):.2f} m²"
+        )
+        self.lbl_power.setText(f"Drag power P = ½ρCdAV³ = {m('drag_power_kw'):,.1f} kW")
+        converged = metrics.get("converged")
+        self.lbl_run.setText(
+            f"OpenFOAM k-ω SST, {int(m('iterations'))} iterations, "
+            + ("converged" if converged else "not fully converged (time-averaged)")
+        )
 
-        # Navier-Stokes Math HUD
-        re = metrics.get("reynolds_number", 0.0)
-        self.lbl_reynolds.setText(f"Reynolds Number Re: {re:,.0f} (Turbulent)")
-        self.lbl_drag_force.setText(f"Aerodynamic Drag F_drag: {metrics.get('drag_force_n', 0.0):.1f} N")
-        self.lbl_lift_force.setText(f"Aerodynamic Lift F_lift: {metrics.get('lift_force_n', 0.0):+.1f} N")
-        self.lbl_cd.setText(f"Drag Coefficient C_d: {metrics.get('drag_coefficient_cd', 0.0):.2f}")
-        self.lbl_pressure_peak.setText(f"Stagnation Pressure Δp: {metrics.get('max_pressure_pa', 0.0):.1f} Pa")
+        if state["filled"]:
+            src = metrics.get("filled_from")
+            where = ""
+            if isinstance(src, (int, float)) and 0 <= int(src) < len(self.state_mgr.directions_deg):
+                where = f" ({self.state_mgr.directions_deg[int(src)]:g}°)"
+            self.lbl_filled.setText(f"Nearest simulated direction shown{where}: this angle is not solved yet.")
+            self.lbl_filled.show()
+        else:
+            self.lbl_filled.hide()
 
-        # Sustainability HUD
-        kw = metrics.get("drag_power_kw", 0.0)
-        self.lbl_power_cubic.setText(f"Drag Power P = ½ρCdA·V³: {kw:.2f} kW")
-        self.lbl_fuel_burn.setText(f"Energy / Fuel Burn: {metrics.get('fuel_burn_l_per_hr', 0.0):.2f} L/h")
-        self.lbl_co2_savings.setText(f"CO₂ Saved vs Baseline: +{metrics.get('co2_saved_kg_per_hr', 0.0):.1f} kg/h")
-        self.lbl_eff_gain.setText(f"Aerodynamic Efficiency Gain: +{metrics.get('efficiency_gain_pct', 0.0):.1f}%")
+        self.overlay.set_metrics(metrics)
+        self.overlay.adjustSize()
+        self.overlay.raise_()
 
         self.plotter.render()
 
-    def _animate_flow(self):
-        """Animates flow tracers/particles advancing through the wind tunnel."""
-        if self.streamline_points_cache is None or len(self.streamline_points_cache) == 0:
+    def on_view_changed(self, view: int) -> None:
+        """Switch all actors and scalar bars to `view` (0 pressure, 1 dominant term, 2 turbulence k)."""
+        self.lbl_view.setText(VIEW_NAMES[view % len(VIEW_NAMES)])
+        cyan, dominant, kmap = self.line_actors
+        cyan.SetVisibility(view == 0)
+        dominant.SetVisibility(view == 1)
+        kmap.SetVisibility(view == 2)
+
+        # The model carries pressure colours only in view 0; elsewhere it is grey so the single
+        # colour scale on screen belongs to the streamlines.
+        self.mesh_actor.mapper.scalar_visibility = view == 0
+        self.mesh_actor.prop.color = MODEL_GREY
+        self.pressure_bar.setVisible(view == 0)
+        self.k_bar.setVisible(view == 2)
+        self.term_legend.setVisible(view == 1)
+        self._layout_overlays()
+        self.plotter.render()
+
+    def _layout_overlays(self) -> None:
+        """Place the floating widgets on the 3D view: cards top-left, colour bar / legend bottom-centre."""
+        pw, ph = self.plotter.width(), self.plotter.height()
+        self.overlay.setFixedWidth(int(min(400, max(340, 0.62 * pw))))
+        self.overlay.adjustSize()
+        self.overlay.move(14, 14)
+        self.overlay.raise_()
+        bar_w = int(min(560, max(280, 0.6 * pw)))
+        for bar in (self.pressure_bar, self.k_bar):
+            bar.setFixedWidth(bar_w)
+            bar.move((pw - bar_w) // 2, ph - bar.height() - 14)
+            bar.raise_()
+        self.term_legend.adjustSize()
+        self.term_legend.move(14, ph - self.term_legend.height() - 14)
+        self.term_legend.raise_()
+
+    def _apply_responsive_layout(self) -> None:
+        """HUD width follows the window; long texts are dropped on short windows rather than squeezed."""
+        self.hud.setFixedWidth(int(min(HUD_MAX_WIDTH, max(HUD_MIN_WIDTH, 0.3 * self.width()))))
+        compact = self.height() < COMPACT_HEIGHT
+        self.lbl_desc.setVisible(not compact)
+        self.ns_panel.caption.setVisible(not compact)
+        self.lbl_run.setVisible(not compact)
+        self.hud_layout.setSpacing(4 if compact else 8)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._apply_responsive_layout()
+
+    # ------------------------------------------------------------------------------------------
+    # Animation
+    # ------------------------------------------------------------------------------------------
+    def _animate_flow(self) -> None:
+        """Slide white tracer dots along the streamlines (linear interpolation between line points)."""
+        if not self.isVisible() or len(self._run_starts) == 0:
             return
+        self.anim_phase = (self.anim_phase + PHASE_PER_FRAME) % 1.0
+        pos = particles_on_lines(self._line_points, self._run_starts, self._run_lengths, self.anim_phase)
+        self.particles_poly.copy_from(pv.PolyData(pos.astype(np.float32)))
+        self.plotter.render()
 
-        # Advance phase proportional to wind velocity
-        speed = self.controller.current_wind_speed
-        self.anim_phase = (self.anim_phase + 0.02 * (speed / 30.0)) % 1.0
+    # ------------------------------------------------------------------------------------------
+    # Keyboard / wheel -> controller
+    # ------------------------------------------------------------------------------------------
+    def focusNextPrevChild(self, next_: bool) -> bool:  # noqa: N802 (Qt override)
+        """Tab must reach the controller (view switch), never move the keyboard focus."""
+        return False
 
-        # Sample points along streamlines
-        pts = self.streamline_points_cache
-        n_pts = len(pts)
-        if n_pts > 20:
-            indices = np.linspace(int(self.anim_phase * 20), n_pts - 1, num=35, dtype=int)
-            sample_pts = pts[indices]
-            valid_pts = sample_pts[~np.isnan(sample_pts).any(axis=1)]
+    def _route_key(self, event: QKeyEvent) -> bool:
+        if event.key() == Qt.Key_Backtab:  # Shift+Tab: same as Tab, the views only cycle one way
+            self.controller.cycle_view()
+            return True
+        return self.controller.handle_key_press(event)
 
-            if len(valid_pts) > 0:
-                particle_poly = pv.PolyData(valid_pts)
-                if self.particles_actor is not None:
-                    self.plotter.remove_actor(self.particles_actor)
-                self.particles_actor = self.plotter.add_mesh(
-                    particle_poly,
-                    color="#FFFFFF",
-                    point_size=7.0,
-                    render_points_as_spheres=True,
-                    opacity=0.9
-                )
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 (Qt override)
+        """The 3D widget would swallow keys for itself (VTK shortcuts) and the wheel (zoom): route them first."""
+        if obj is self.plotter:
+            if event.type() == QEvent.KeyPress and self._route_key(event):
+                return True
+            if event.type() == QEvent.Wheel and self.controller.handle_wheel_event(event):
+                return True
+            if event.type() == QEvent.Resize:
+                self._layout_overlays()
+                self._fit_camera()
+        return super().eventFilter(obj, event)
 
-    def keyPressEvent(self, event: QKeyEvent):
-        """Forward all macropad/keyboard events to global controller."""
-        if not self.controller.handle_key_press(event):
+    def event(self, event) -> bool:
+        # Qt turns Tab into a focus change inside QWidget.event(); take it before that happens.
+        if event.type() == QEvent.KeyPress and event.key() in (Qt.Key_Tab, Qt.Key_Backtab):
+            if self._route_key(event):
+                return True
+        return super().event(event)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
+        if not self._route_key(event):
             super().keyPressEvent(event)
 
-    def wheelEvent(self, event: QWheelEvent):
-        """Forward wheel events to global controller."""
+    def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
         if not self.controller.handle_wheel_event(event):
             super().wheelEvent(event)
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self.plotter.setFocus()  # so a macropad keystroke has somewhere to land
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        self.anim_timer.stop()
+        try:
+            self.plotter.close()
+        finally:
+            super().closeEvent(event)
