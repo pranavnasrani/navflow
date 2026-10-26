@@ -92,11 +92,11 @@ def main():
     # controller as the macropad. The display itself stays this native app.
     remote_url = None
     if not args.no_remote:
-        remote = RemoteServer(input_ctrl, port=int(config["controls"]["remote_port"]))
         try:
+            remote = RemoteServer(input_ctrl, port=int(config["controls"]["remote_port"]))
             remote_url = remote.start()
             app.aboutToQuit.connect(remote.stop)
-        except OSError as exc:
+        except (OSError, OverflowError, ValueError, TypeError, KeyError) as exc:  # busy or invalid port: never block the launch
             print(f"\n[!] {exc}\n[!] Continuing without the iPad remote (use the keyboard or macropad).", file=sys.stderr)
 
     screens = QApplication.screens()

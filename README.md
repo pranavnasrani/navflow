@@ -70,16 +70,18 @@ Demonstrating why streamlining cutting frontal area or drag coefficient saves ma
 
 ## 🛠️ Regenerating CFD States & Using Custom 3D Models
 
-### Using Custom 3D Models (.stl or .obj)
-Drop your own 3D files into:
-- `assets/models/airplane/model.stl`
-- `assets/models/f1_car/model.stl`
-- `assets/models/building/model.stl`
-- `assets/models/human/model.stl`
+### Using Custom 3D Models (.stl, .obj, .ply, .glb, .gltf)
+Put each download in its own folder, one file per object:
+- `assets/models/incoming/airplane/`
+- `assets/models/incoming/f1_car/`
+- `assets/models/incoming/building/`
+- `assets/models/incoming/human/`
+
+(or pass the file with `--src <file>`). `prepare_model.py` writes the tunnel-ready result to `assets/models/<object>/model.stl`.
 
 Then prepare, simulate and import (see `CLAUDE.md` for the full command list):
 ```bash
-./.venv/bin/python solver/prepare_model.py --object airplane      # check the preview.png it writes
+./.venv/bin/python solver/prepare_model.py --object airplane      # (or add --src <file>) check the preview.png it writes
 ./.venv/bin/python solver/run_openfoam.py run --objects airplane --preview   # quick 3-direction check
 ./.venv/bin/python solver/run_openfoam.py run --objects airplane              # all 9 directions
 ./.venv/bin/python solver/import_results.py                                   # -> assets/cache/*.npz

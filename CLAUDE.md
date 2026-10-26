@@ -72,7 +72,7 @@ This repository contains an interactive, native 4-monitor 3D Computational Fluid
 `app/main.py` serves a touch page on `controls.remote_port` (8765) and prints the URL (`http://<lan-ip>:8765/`) in the terminal and on each window. Open it in Safari on any device on the same Wi-Fi or phone hotspot. If the port is busy the app prints a warning and runs without the remote. The server lives in `app/remote_server.py`; the page is the single file `app/remote/index.html`.
 
 ### Two machines (laptop + Mac mini)
-Each machine keeps its own queue file `runs/full/queue_<machine>.json` (`--machine`, default `laptop`), so results pulled from the mini never overwrite the laptop's queue.
+Each machine keeps its own queue file `runs/full/queue_<machine>.json`, chosen with `--machine` (default `laptop`). **On the mini always pass `--machine mini`** (for `run`, `stop` and `status`), e.g. `run_openfoam.py run --objects building human --machine mini`; `pull_from_mini.sh` also refuses to copy `queue_laptop.json`, so the laptop's queue is never overwritten.
 ```bash
 ./scripts/sync_to_mini.sh     # rsync the project to $MINI_HOST (default mac-mini.local), excluding .venv, runs, .git
 ./scripts/pull_from_mini.sh   # rsync the mini's runs/full/ back into runs/full/, then run import_results.py

@@ -7,4 +7,6 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 mkdir -p runs/full
-rsync -av "${MINI_HOST:-mac-mini.local}:navflow/runs/full/" runs/full/
+# Never copy queue_laptop.json: a run on the mini started without --machine mini writes that name,
+# and it would overwrite the laptop's real queue.
+rsync -av --exclude 'queue_laptop.json' "${MINI_HOST:-mac-mini.local}:navflow/runs/full/" runs/full/
