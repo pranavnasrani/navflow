@@ -15,6 +15,7 @@ from PySide6.QtCore import QCoreApplication
 from PySide6.QtWidgets import QApplication
 
 from app.input_controller import ExhibitionInputController
+import app.remote_server as remote_server
 from app.remote_server import RemoteServer, parse_command
 
 INDEX_HTML = Path(__file__).resolve().parent.parent / "app" / "remote" / "index.html"
@@ -245,3 +246,38 @@ def test_busy_port_raises_oserror_with_clear_message(qapp, controller):
         with pytest.raises(OSError, match=str(busy)):
             srv.start()
         srv.stop()  # must still be safe after a failed start
+
+
+# ---- lan_ip fallbacks (isolated router / phone hotspot: no default route) ------------------
+
+def test_lan_ip_default_route_probe_wins(monkeypatch):
+    monkeypatch.setattr(remote_server, "_probe_route", lambda target: "192.168.1.7")
+    monkeypatch.setattr(remote_server, "_hostname_addresses", lambda: ["10.9.9.9"])
+    assert remote_server.lan_ip() == "192.168.1.7"
+
+
+def test_lan_ip_without_default_route_uses_hotspot_probe(monkeypatch):
+    # only the iPhone-hotspot gateway probe finds an interface
+    monkeypatch.setattr(remote_server, "_probe_route", lambda t: "172.20.10.3" if t == "172.20.10.1" else None)
+    monkeypatch.setattr(remote_server, "_hostname_addresses", lambda: [])
+    assert remote_server.lan_ip() == "172.20.10.3"
+
+
+def test_lan_ip_without_any_route_picks_private_hostname_address(monkeypatch):
+    monkeypatch.setattr(remote_server, "_probe_route", lambda target: None)
+    monkeypatch.setattr(remote_server, "_hostname_addresses",
+                        lambda: ["127.0.0.1", "127.0.1.1", "169.254.3.4", "8.8.4.4", "192.168.4.20", "10.0.0.2"])
+    ip = remote_server.lan_ip()
+    assert ip == "192.168.4.20"  # first private, non-loopback, non-link-local IPv4
+
+
+def test_lan_ip_ignores_public_address_from_gateway_probe(monkeypatch):
+    monkeypatch.setattr(remote_server, "_probe_route", lambda t: "93.184.216.34" if t == "192.168.255.255" else None)
+    monkeypatch.setattr(remote_server, "_hostname_addresses", lambda: ["10.1.2.3"])
+    assert remote_server.lan_ip() == "10.1.2.3"
+
+
+def test_lan_ip_loopback_when_nothing_works(monkeypatch):
+    monkeypatch.setattr(remote_server, "_probe_route", lambda target: None)
+    monkeypatch.setattr(remote_server, "_hostname_addresses", lambda: ["127.0.1.1"])
+    assert remote_server.lan_ip() == "127.0.0.1"

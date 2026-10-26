@@ -77,15 +77,13 @@ Drop your own 3D files into:
 - `assets/models/building/model.stl`
 - `assets/models/human/model.stl`
 
-Then run:
+Then prepare, simulate and import (see `CLAUDE.md` for the full command list):
 ```bash
-# Full exhibition precomputation (10 Z-steps x 5 wind speeds = 50 states per object)
-python3 solver/batch_precompute.py
-
-# Quick testing mode (3 Z-steps x 2 wind speeds)
-python3 solver/batch_precompute.py --quick
+./.venv/bin/python solver/prepare_model.py --object airplane      # check the preview.png it writes
+./.venv/bin/python solver/run_openfoam.py run --objects airplane --preview   # quick 3-direction check
+./.venv/bin/python solver/run_openfoam.py run --objects airplane              # all 9 directions
+./.venv/bin/python solver/import_results.py                                   # -> assets/cache/*.npz
 ```
 
-### ANSYS Fluent & OpenFOAM Integration
-- **ANSYS Fluent**: Export simulation results as `.vtk` or `.vtu` files from your friend's PC. Use `solver/vtk_importer.py` to convert them into the app's cache.
-- **OpenFOAM**: Run `python3 -m solver.openfoam_bridge` to automate cases inside Docker on macOS.
+### OpenFOAM
+`solver/run_openfoam.py` runs OpenFOAM in Docker (resumable queue, per machine). `scripts/sync_to_mini.sh` and `scripts/pull_from_mini.sh` share the work with a second Mac. The previous homemade-solver exhibit is the git tag `v1-fallback`.

@@ -6,6 +6,8 @@ Modes:
 - Development Mode (--dev-mode, default): Opens 4 synchronized windows arranged on the current desktop.
 - Single Object Mode (--object <id>): Runs a single window for focused testing.
 
+The iPad remote (a small HTTP page on controls.remote_port) starts automatically; pass --no-remote to skip it.
+
 The windows show OpenFOAM results from assets/cache/<object>_states.npz (written by
 solver/import_results.py). There is no live solving at run time.
 """
@@ -25,6 +27,7 @@ from PySide6.QtWidgets import QApplication
 from app.cache_format import read_cache
 from app.input_controller import ExhibitionInputController
 from app.monitor_window import MonitorWindow
+from app.remote_server import RemoteServer
 from solver.foam.settings import load_settings
 
 CACHE_HELP = (
@@ -55,6 +58,7 @@ def main():
     parser.add_argument("--dev-mode", action="store_true", help="Arrange windows on the primary desktop for development")
     parser.add_argument("--object", type=str, default=None, help="Run only one specific object (airplane, f1_car, building, human)")
     parser.add_argument("--config", type=str, default="config/exhibition_config.json", help="Path to config file")
+    parser.add_argument("--no-remote", action="store_true", help="Do not start the iPad remote web server")
     parser.add_argument("--cache-dir", type=str, default="assets/cache", help="Folder holding <object>_states.npz")
     args = parser.parse_args()
 
@@ -84,6 +88,17 @@ def main():
         knob_step=float(config["controls"]["knob_step"]),
     )
 
+    # iPad remote: a tiny HTTP server so a tablet on the same Wi-Fi / hotspot drives the same
+    # controller as the macropad. The display itself stays this native app.
+    remote_url = None
+    if not args.no_remote:
+        remote = RemoteServer(input_ctrl, port=int(config["controls"]["remote_port"]))
+        try:
+            remote_url = remote.start()
+            app.aboutToQuit.connect(remote.stop)
+        except OSError as exc:
+            print(f"\n[!] {exc}\n[!] Continuing without the iPad remote (use the keyboard or macropad).", file=sys.stderr)
+
     screens = QApplication.screens()
     print(f"Detected {len(screens)} physical display(s).")
 
@@ -93,6 +108,7 @@ def main():
             obj_id=obj_cfg["id"],
             input_controller=input_ctrl,
             cache_dir=str(cache_dir),
+            remote_url=remote_url,
         )
         windows.append(win)
 
@@ -134,6 +150,10 @@ def main():
     print("  - Keys Right / Left or '+' / '-' : Turn the wind-direction knob")
     print("  - Mouse Wheel     : Smoothly turn the knob")
     print("  - Tab             : Change view (pressure / dominant N-S term / turbulence k)")
+    if remote_url:
+        print(f"  - iPad remote     : open {remote_url} in Safari on the same network")
+    else:
+        print("  - iPad remote     : off")
     print("========================================================\n")
 
     sys.exit(app.exec())

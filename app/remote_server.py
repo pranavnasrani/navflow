@@ -22,6 +22,7 @@ Maths link (IGCSE 0606): the page turns the dial angle into the knob with a stra
 the same linear interpolation the state manager uses to map knob to wind direction.
 """
 
+import ipaddress
 import json
 import math
 import socket
@@ -63,20 +64,57 @@ def parse_command(body: bytes) -> tuple[str, float]:
     return kind, value
 
 
+def _is_private_lan(ip: str) -> bool:
+    """True for a usable private IPv4 (10.x, 172.16-31.x, 192.168.x), never loopback or link-local."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return addr.version == 4 and addr.is_private and not addr.is_loopback and not addr.is_link_local
+
+
+def _probe_route(target: str) -> str | None:
+    """Address of the interface the OS would use to reach `target` (UDP connect sends no packet)."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect((target, 9))
+            ip = s.getsockname()[0]
+    except OSError:
+        return None
+    return ip if ip and not ip.startswith("0.") else None
+
+
+def _hostname_addresses() -> list[str]:
+    """IPv4 addresses the machine's own hostname resolves to (works with no default route)."""
+    try:
+        infos = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
+    except OSError:
+        return []
+    return [info[4][0] for info in infos]
+
+
 def lan_ip() -> str:
     """
-    This machine's LAN address. A UDP "connect" sends no packet; it only makes the OS pick the
-    outgoing interface, whose address we read back. Falls back to 127.0.0.1 with no network.
+    This machine's LAN address, for the URL typed on the iPad.
+
+    1. Default-route probes: a UDP "connect" to a public address makes the OS pick the outgoing
+       interface, whose address we read back (8.8.8.8, then 10.255.255.255).
+    2. No default route (an isolated router or phone hotspot): probe the common private gateways
+       192.168.255.255 and 172.20.10.1 (iPhone hotspots use 172.20.10.x), then the addresses the
+       hostname resolves to; the first private IPv4 that is not 127.x wins.
+    3. Otherwise 127.0.0.1.
     """
     for probe in ("8.8.8.8", "10.255.255.255"):
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-                s.connect((probe, 9))
-                ip = s.getsockname()[0]
-            if ip and not ip.startswith("0."):
-                return ip
-        except OSError:
-            continue
+        ip = _probe_route(probe)
+        if ip:
+            return ip
+    for probe in ("192.168.255.255", "172.20.10.1"):
+        ip = _probe_route(probe)
+        if ip and _is_private_lan(ip):
+            return ip
+    for ip in _hostname_addresses():
+        if _is_private_lan(ip):
+            return ip
     return "127.0.0.1"
 
 
