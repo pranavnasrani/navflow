@@ -80,3 +80,31 @@ def test_restart_segments_dedupe():
 
 def test_load_forces_empty():
     assert load_forces([]).shape == (0, 4)
+
+
+def test_parse_skips_truncated_last_line():
+    good = "1 1 2 3 0 0 0 0 0 0\n"
+    a = parse_force_dat(good + "2 (1 2")
+    assert a.tolist() == [[1, 1, 2, 3]]
+    assert parse_force_dat("2 (1 2").shape == (0, 4)
+
+
+def test_parse_skips_cut_off_number_token():
+    good = "1 1 2 3 0 0 0 0 0 0\n"
+    a = parse_force_dat(good + "2 (1 2 3.5e")
+    assert a.tolist() == [[1, 1, 2, 3]]
+    assert parse_force_dat("2 1 2 1.2e").shape == (0, 4)
+
+
+def _seg(first, last, fx):
+    return "".join(f"{i} {fx} 0 0 0 0 0 0 0 0\n" for i in range(first, last + 1))
+
+
+def test_restart_truncates_stale_tail_of_old_segment():
+    old = _seg(1, 187, 1)  # ran on to 187 before the interruption
+    new = _seg(151, 160, 2)  # resumed from the save at 150
+    f = load_forces([old, new])
+    assert f[-1, 0] == 160
+    assert f[:, 0].tolist() == list(range(1, 161))
+    assert np.all(f[f[:, 0] <= 150, 1] == 1)
+    assert np.all(f[f[:, 0] > 150, 1] == 2)

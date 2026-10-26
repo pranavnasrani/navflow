@@ -23,6 +23,7 @@ def parse_force_dat(text: str) -> np.ndarray:
     '#' lines and blank lines are skipped and '(' ')' are stripped, so both the
     '10 (1 2 3) (0 0 0) (1 2 3)' and the plain '10 1 2 3 0 0 0 1 2 3' layouts parse.
     Only the first four numbers matter: Time, then the total force vector.
+    A truncated last line (live read during a write, or power loss) is skipped, not an error.
     """
     rows = []
     for line in text.splitlines():
@@ -30,24 +31,38 @@ def parse_force_dat(text: str) -> np.ndarray:
         if not line or line.startswith("#"):
             continue
         parts = line.replace("(", " ").replace(")", " ").split()
-        rows.append([float(p) for p in parts[:_N_COLS]])
+        try:
+            row = [float(p) for p in parts[:_N_COLS]]
+        except ValueError:  # cut-off token such as "1.2e": a write in progress or power loss
+            continue
+        if len(row) == _N_COLS:  # a truncated final line has too few numbers: skip it
+            rows.append(row)
     if not rows:
         return np.empty((0, _N_COLS))
     return np.array(rows, dtype=float)
 
 
 def load_forces(texts: list[str]) -> np.ndarray:
-    """Join restart segments (texts in time order); keep the LAST row for each iteration.
+    """Join restart segments (texts in time order) into one history, sorted by iteration.
 
-    A restart re-writes the iteration it resumed from, and the later segment holds the
-    newer (correct) value. Result is sorted by iteration.
+    A restart resumes from the last saved iteration (say 150) even though the old segment
+    ran on to 187. The later segment is the truth from its first iteration onward, so it
+    truncates every earlier row with iteration >= its own first iteration. Without this,
+    stale rows 161-187 would survive until the new run overtook them and would pollute the
+    convergence window. Within the result the last row per iteration wins.
     """
-    parts = [a for a in (parse_force_dat(t) for t in texts) if len(a)]
-    if not parts:
+    kept: list[np.ndarray] = []
+    for text in texts:
+        seg = parse_force_dat(text)
+        if not len(seg):
+            continue
+        first = seg[0, 0]
+        kept = [k[k[:, 0] < first] for k in kept]
+        kept.append(seg)
+    if not kept:
         return np.empty((0, _N_COLS))
-    all_rows = np.vstack(parts)
     latest: dict[float, np.ndarray] = {}
-    for row in all_rows:  # later rows overwrite earlier ones with the same iteration
+    for row in np.vstack(kept):  # duplicates inside one segment: last row wins
         latest[float(row[0])] = row
     return np.array([latest[k] for k in sorted(latest)], dtype=float)
 
