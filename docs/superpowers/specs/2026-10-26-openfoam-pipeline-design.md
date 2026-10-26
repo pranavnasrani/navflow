@@ -151,7 +151,7 @@ The repo already works end to end, but it uses a small home-made solver on a coa
 2. **Navier-Stokes view:** the equation on screen, with a live bar for each term at the current setting:
    - (v·∇)v, the air speeding up and turning;
    - −∇p/ρ, the pressure push;
-   - ν∇²v, viscous friction.
+   - ν_eff∇²v, viscous friction including k-ω SST turbulent mixing (ν_eff = ν + ν_t). With wall functions, the molecular ν alone is about 10⁻⁴ of the other terms everywhere. *(Controller ruling, 27 Oct.)*
 
    The air is coloured by whichever term is biggest. Judges see that friction only matters in the thin layer next to the surface (the boundary layer).
 3. **Turbulence view (k-ω SST):** streamlines coloured by turbulence energy k.
@@ -164,7 +164,7 @@ The repo already works end to end, but it uses a small home-made solver on a coa
 - **F1 car and plane:** two widgets overlaid on the view.
   - **Fuel saved:** from drag power, using the existing fuel and CO₂ factors. SDG 13, Climate Action.
   - **Speed gain:** the extra top speed lower drag gives at the same engine power. Drag power = ½ρC_dAV³, so V_new = V × (C_dA_old / C_dA_new)^(1/3).
-  - Comparisons are against a blunt reference shape with the same frontal area (C_d = 1.0, like the human bluff body), set per object in the config. The plane's widget is worked out at cruise. *(Builder's call.)*
+  - Comparisons are against the object's own worst (highest drag-power) simulated angle, so the saving changes as visitors turn the knob and is zero at the worst angle. The plane's widget is worked out at cruise. *(Controller ruling, 27 Oct. A fixed C_d = 1.0 reference gave an absurd 67,200 L/h for the plane.)*
 - **Building:** an SDG 9 (Industry, Innovation and Infrastructure) widget for hurricane wind load. It shows the force on the tower and the bending moment at its base, at hurricane speed versus a 12 km/h breeze (forces scale with V²), and which wind direction is worst. Earthquake and tsunami get a static info card at most.
 
 ### 5.9 iPad remote
