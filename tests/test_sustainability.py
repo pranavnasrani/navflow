@@ -33,3 +33,9 @@ def test_wind_load_table_scales_with_v_squared():
     assert cat5["moment_nm"] == pytest.approx(9800)
     assert rows[2]["force_n"] == pytest.approx(1000)
     assert set(cat5) == {"label", "v_m_s", "force_n", "moment_nm"}
+
+
+def test_speed_gain_is_zero_for_non_positive_cd():
+    assert speed_gain_pct(0.0, 1.0) == 0.0
+    assert speed_gain_pct(-0.2, 1.0) == 0.0
+    assert speed_gain_pct(0.5, 0.0) == 0.0

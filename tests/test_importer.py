@@ -55,7 +55,7 @@ def force_text(rows):
 
 def write_fake_result(
     root, cfd, model0, idx, *, status="done", fields="instant", forces=None, moments=None,
-    p_inst=1.0, p_mean=3.0,
+    p_inst=1.0, p_mean=3.0, cell_only=False,
 ):
     """Write runs/<root>/<obj>/<run>/result/ in the layout the real pipeline produces."""
     deg = cfd.directions_deg[idx]
@@ -82,6 +82,16 @@ def write_fake_result(
             grid.point_data["U" + suffix] = np.column_stack([SPEED + 0.1 * y, 0 * x, 0 * x])
             grid.point_data["p" + suffix] = np.full(len(x), p)
             grid.point_data["k" + suffix] = x + ko
+        grid.point_data["nut"] = np.full(grid.n_points, 0.5)  # a mean-field run still writes plain nut
+        if cell_only:  # an export with cell data only: same linear fields, sampled at the cell centres
+            centres = grid.cell_centers().points
+            cx, cy = centres[:, 0], centres[:, 1]
+            grid.point_data.clear()
+            for suffix, p, ko in (("", p_inst * p_scale, k_offset), ("Mean", p_mean * p_scale, k_offset + 100)):
+                grid.cell_data["U" + suffix] = np.column_stack([SPEED + 0.1 * cy, 0 * cx, 0 * cx])
+                grid.cell_data["p" + suffix] = np.full(len(cx), p)
+                grid.cell_data["k" + suffix] = cx + ko
+            grid.cell_data["nut"] = np.full(grid.n_cells, 0.5)
         grid.save(vdir / "internal.vtu")
         run_model = run_geometry(model0, cfd, deg)
         patch = pv.PolyData.from_regular_faces(np.asarray(run_model.vertices), np.asarray(run_model.faces))
@@ -150,6 +160,9 @@ def test_import_fake_result(root, tmp_path):
     np.testing.assert_array_equal(c["d3_w0_lines"], c["d4_w0_lines"])
     m0, m2, m3 = (json.loads(c[f"d{i}_metrics"]) for i in (0, 2, 3))
     assert m0["filled_from"] is None and m2["filled_from"] == 0 and m3["filled_from"] == 4
+    # a filled slot reports its own angle, while the numbers come from the source run
+    assert (m0["direction_deg"], m2["direction_deg"], m3["direction_deg"]) == (0.0, 20.0, 30.0)
+    assert m2["drag_force_n"] == m0["drag_force_n"]
 
 
 def test_metrics_values(root, tmp_path):
@@ -235,6 +248,20 @@ def test_import_with_no_results_raises(root, tmp_path):
     with pytest.raises(ValueError, match="No finished runs for box"):
         import_object("box", make_settings(), cfd, model0, OBJ_CONFIG, root, out)
     assert not out.exists()
+
+
+def test_cell_only_internal_mesh_is_accepted(root, tmp_path):
+    """U, p, k and nut that exist only as cell data are averaged onto the points (no KeyError)."""
+    cfd, model0 = make_cfd(), make_model0()
+    write_fake_result(root, cfd, model0, 4, cell_only=True)
+    _, out, _, _ = run_import(root, tmp_path, cfd, model0=model0)
+    c = read_cache(out)
+    lines, k = c["d4_w1_lines"], c["d4_w1_k"]
+    ok = ~np.isnan(k)
+    assert ok.sum() > 8
+    x_run = (lines[ok].astype(float) @ rotation_matrix("y", 40.0).T)[:, 0]
+    np.testing.assert_allclose(k[ok], x_run + 100.0, atol=1.0)  # cell-to-point averaging blurs by < 1 cell
+    assert set(json.loads(c["d4_ns_terms"])) == {"convective", "pressure", "viscous"}
 
 
 def test_failed_and_unfinished_runs_are_not_finished(root, tmp_path):

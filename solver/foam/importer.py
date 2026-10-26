@@ -41,6 +41,7 @@ from solver.foam.sustainability import drag_power_kw, fuel_and_co2, speed_gain_p
 
 FINISHED = ("done", "flagged")
 FIELD_NAMES = {"instant": ("U", "p", "k"), "mean": ("UMean", "pMean", "kMean")}
+NUT_NAME = "nut"  # eddy viscosity; the run exports no nutMean, so mean-field runs use the instantaneous nut
 SUMMARY_MARGIN = 0.25  # the N-S term summary covers the model bbox +- 0.25 D (D = longest bbox side)
 CLIP_PAD = 0.25  # extra D around the clip box so edge cells still have neighbours for their derivatives
 
@@ -225,9 +226,11 @@ def _import_direction(
     box = np.empty(6)  # smallest box holding the view region and the summary region, plus a pad
     box[0::2] = np.minimum(view[0::2], summary_box[0::2]) - CLIP_PAD * d
     box[1::2] = np.maximum(view[1::2], summary_box[1::2]) + CLIP_PAD * d
-    region = _clip(grid, box, (u_name, p_name, k_name))
+    region = _clip(grid, box, (u_name, p_name, k_name, NUT_NAME))
     del grid
-    region = ns_term_fields(region, cfd.kinematic_viscosity_m2_s, u_name, p_name)
+    region = ns_term_fields(region, cfd.kinematic_viscosity_m2_s, u_name, p_name, NUT_NAME)
+    if k_name not in region.point_data:  # a cell-only export: average k onto the points like U and p
+        region.point_data[k_name] = region.cell_data_to_point_data().point_data[k_name]
     ns_terms = ns_term_summary(region, tuple(summary_box))
 
     # 4. streamlines from each smoke wand
@@ -285,6 +288,7 @@ def import_object(
         metrics = dict(src["metrics"])
         if idx in filled:
             metrics["filled_from"] = filled[idx]
+            metrics["direction_deg"] = float(cfd.directions_deg[idx])  # the slot's own angle; the numbers are the source's
         s = state_key(idx)
         payload[f"{s}_metrics"] = json.dumps(metrics)
         payload[f"{s}_pressure"] = src["pressure"]

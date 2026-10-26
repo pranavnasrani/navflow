@@ -1,9 +1,17 @@
 """The three terms of the Navier-Stokes momentum equation, evaluated on an OpenFOAM flow field.
 
-Per unit mass (all in m/s^2, with kinematic pressure p/rho and kinematic viscosity nu):
+Per unit mass (all in m/s^2, with kinematic pressure p/rho and EFFECTIVE kinematic viscosity
+nu_eff = nu + nut):
 
-    (v . grad) v   =   - grad p   +   nu laplacian(v)
+    (v . grad) v   =   - grad p   +   nu_eff laplacian(v)
     convective         pressure       viscous
+
+nu is the molecular viscosity of air. nut is the turbulent ("eddy") viscosity from the k-omega SST
+model: swirling eddies mix momentum far faster than molecules do, so in a turbulent flow the
+friction-like term is the viscous friction INCLUDING turbulent mixing. With the molecular nu alone
+(1.5e-5 m^2/s) that term is about 1e-4 of the others everywhere, and the friction that really acts
+in the thin layer next to the surface would never show. If the file has no nut array the molecular
+nu is used.
 
 Maths link (IGCSE 0606):
   * A partial derivative dv_i/dx_j is a rate of change: a small increment delta v_i divided by a
@@ -11,7 +19,7 @@ Maths link (IGCSE 0606):
   * The convective term is the CHAIN RULE. A fluid particle at position x(t) feels the change
         dv_i/dt = sum_j (dv_i/dx_j)(dx_j/dt) = sum_j v_j dv_i/dx_j,
     because dx_j/dt is the velocity component v_j. That sum is a connected rate of change.
-  * The viscous term uses SECOND derivatives (friction): laplacian(v_i) = sum_j d/dx_j (dv_i/dx_j),
+  * The viscous term uses SECOND derivatives (friction), multiplied by nu_eff: laplacian(v_i) = sum_j d/dx_j (dv_i/dx_j),
     i.e. differentiate twice, once per direction, and add. Where the velocity curves strongly,
     neighbouring layers of fluid drag on each other.
   * The pressure term is the gradient |grad p|: the steepness of the pressure "hill".
@@ -46,15 +54,22 @@ def _derivative(grid: pv.DataSet, scalars: str, gradient: str | bool = False, di
     return np.asarray(out[name], dtype=float)
 
 
-def ns_term_fields(grid: pv.DataSet, nu: float, u_name: str, p_name: str) -> pv.DataSet:
+def ns_term_fields(
+    grid: pv.DataSet, nu: float, u_name: str, p_name: str, nut_name: str | None = "nut"
+) -> pv.DataSet:
     """Return a copy of `grid` with point arrays ns_convective, ns_pressure, ns_viscous, ns_dominant.
 
     `ns_dominant` is the index (0 convective, 1 pressure, 2 viscous) of the largest term, int8.
     `p_name` must be kinematic pressure (p / rho), as OpenFOAM's incompressible solvers write it.
+    The viscous term uses nu_eff = nu + nut when an array called `nut_name` exists (point or cell data),
+    otherwise the molecular `nu` alone. Cell-only arrays are averaged onto the points.
     """
     out = grid.copy()
     out.point_data[u_name] = _point_array(grid, u_name)
     out.point_data[p_name] = _point_array(grid, p_name)
+    nu_eff: np.ndarray | float = nu
+    if nut_name is not None and (nut_name in grid.point_data or nut_name in grid.cell_data):
+        nu_eff = nu + np.asarray(_point_array(grid, nut_name), dtype=float)  # nu_eff = nu + nut, per point
     v = np.asarray(out.point_data[u_name], dtype=float)
 
     # Velocity gradient: row i, column j holds dv_i/dx_j. VTK lays the 9 values out row by row.
@@ -74,7 +89,7 @@ def ns_term_fields(grid: pv.DataSet, nu: float, u_name: str, p_name: str) -> pv.
     for i in range(3):
         out.point_data["vtk_grad_row"] = np.ascontiguousarray(jac[:, i, :])
         lap[:, i] = _derivative(out, "vtk_grad_row", divergence="vtk_div_row")
-    viscous = nu * np.linalg.norm(lap, axis=1)
+    viscous = nu_eff * np.linalg.norm(lap, axis=1)
 
     for name in ("vtk_grad_u", "vtk_grad_p", "vtk_grad_row", "vtk_div_row"):
         if name in out.point_data:

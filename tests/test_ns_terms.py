@@ -57,3 +57,27 @@ def test_summary_is_mean_inside_bounds():
     inside = np.all((g.points >= [1.0, 1.0, 1.0]) & (g.points <= [1.5, 2.0, 2.0]), axis=1)
     assert s["pressure"] == pytest.approx(g.point_data["ns_pressure"][inside].mean())
     assert all(isinstance(v, float) for v in s.values())
+
+
+@pytest.mark.parametrize("cell_only", [False, True], ids=["point_nut", "cell_nut"])
+def test_viscous_term_uses_effective_viscosity(cell_only):
+    """nu_eff = nu + nut: a constant nut scales the viscous term by (nu + nut) / nu."""
+    nu, nut = 0.1, 0.4
+    base = ns_term_fields(analytic_grid(), nu, "U", "p")
+    g = analytic_grid()
+    if cell_only:
+        g.cell_data["nut"] = np.full(g.n_cells, nut)
+    else:
+        g.point_data["nut"] = np.full(g.n_points, nut)
+    eff = ns_term_fields(g, nu, "U", "p")
+    mask = interior(g)
+    np.testing.assert_allclose(
+        eff.point_data["ns_viscous"][mask], base.point_data["ns_viscous"][mask] * (nu + nut) / nu, rtol=1e-6
+    )
+    # the other two terms do not depend on viscosity
+    np.testing.assert_allclose(eff.point_data["ns_convective"], base.point_data["ns_convective"])
+    np.testing.assert_allclose(eff.point_data["ns_pressure"], base.point_data["ns_pressure"])
+    # naming a missing array (or None) falls back to the molecular nu
+    for name in ("absent", None):
+        same = ns_term_fields(analytic_grid(), nu, "U", "p", nut_name=name)
+        np.testing.assert_allclose(same.point_data["ns_viscous"], base.point_data["ns_viscous"])

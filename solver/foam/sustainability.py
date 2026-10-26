@@ -37,7 +37,13 @@ def fuel_and_co2(
 
 
 def speed_gain_pct(cd: float, ref_cd: float) -> float:
-    """Extra top speed at equal power, in percent: ((ref_cd / cd)^(1/3) - 1) x 100."""
+    """Extra top speed at equal power, in percent: ((ref_cd / cd)^(1/3) - 1) x 100.
+
+    A drag coefficient that is zero or negative (a noisy or unconverged force) has no meaningful cube
+    root ratio, so it reports 0.0 instead of failing.
+    """
+    if cd <= 0.0 or ref_cd <= 0.0:
+        return 0.0
     return ((ref_cd / cd) ** (1.0 / 3.0) - 1.0) * 100.0
 
 
