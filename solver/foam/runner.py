@@ -76,6 +76,34 @@ def mesh_cell_count(checkmesh_log: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
+# checkMesh marks every failed check with a line starting "***". Quality warnings only mean "some cells are
+# poorly shaped" and snappyHexMesh's own quality controls have already accepted the mesh, so a run may go on.
+# Anything else under "***" (negative volumes, wrong orientation, open cells ...) means a broken mesh.
+STAR_LINE = re.compile(r"^\s*\*\*\*\s*(.*?)\s*$", re.MULTILINE)
+QUALITY_WARNING = re.compile(
+    r"skew|non-?orthogonal|aspect ratio|concave|warped|low quality|determinant"
+    r"|interpolation weight|volume ratio", re.IGNORECASE)
+HARD_ERROR = re.compile(
+    r"negative|zero|orient|open cell|illegal|non-?closed|multiply|unused|wrong", re.IGNORECASE)
+
+
+def check_mesh_log(text: str) -> tuple[bool, list[str]]:
+    """Judge a checkMesh log. Returns (ok, warnings).
+
+    ok is True if the log says "Mesh OK." (warnings = []), or if it has at least one "***" line and
+    every one of them is a quality warning (skewness, non-orthogonality, aspect ratio, ...); the
+    warnings are those lines, without the "***". Any other "***" line is a hard error -> (False, those
+    hard-error lines). A log with neither "Mesh OK." nor any "***" line (empty, crashed) is not ok.
+    """
+    if "Mesh OK." in text:
+        return True, []
+    stars = [m.group(1) for m in STAR_LINE.finditer(text)]
+    hard = [w for w in stars if HARD_ERROR.search(w) or not QUALITY_WARNING.search(w)]
+    if hard:
+        return False, hard
+    return bool(stars), stars
+
+
 class RunnerError(RuntimeError):
     """The solver vanished without finishing, or Docker misbehaved; the run stays resumable."""
 
@@ -249,9 +277,15 @@ def _write_and_mesh(rec: RunRecord, ctx: RunContext) -> bool:
     ctx.say(f"[{rec.run_id}] meshing")
     c.sh(key, MESH_SCRIPT, check=False)
     check_log = c.read(key, "log.checkMesh")
-    if "Mesh OK." not in check_log:
-        _fail(rec, ctx, "checkMesh did not report 'Mesh OK.' (see log.checkMesh)")
+    ok, warnings = check_mesh_log(check_log)
+    if not ok:
+        detail = f": {'; '.join(warnings)}" if warnings else ""
+        _fail(rec, ctx, f"checkMesh did not report 'Mesh OK.'{detail} (see log.checkMesh)")
         return False
+    rec.mesh_warnings = warnings
+    if warnings:
+        ctx.say(f"[{rec.run_id}] WARNING: mesh has quality warnings but no hard errors, continuing: "
+                + "; ".join(warnings))
     _report_cells(rec, ctx, check_log)
     return True
 
@@ -362,7 +396,7 @@ def _export(rec: RunRecord, ctx: RunContext, fields: str) -> RunRecord:
         "run_id": rec.run_id, "obj_id": rec.obj_id, "direction_index": rec.direction_index,
         "direction_deg": rec.direction_deg, "speed_m_s": ctx.objects[rec.obj_id].speed_m_s,
         "iterations": rec.iterations, "converged": rec.converged, "fields": fields, "status": rec.status,
-        "cells": rec.cells,
+        "cells": rec.cells, "mesh_warnings": rec.mesh_warnings,
     }, indent=2))
     ctx.say(f"[{rec.run_id}] {rec.status} after {rec.iterations} iterations (fields: {fields})")
     _notify(rec, ctx)  # record the final status BEFORE freeing the volume: a crash in between is harmless

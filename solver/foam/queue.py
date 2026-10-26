@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from solver.foam.settings import ObjectCfd
@@ -29,6 +29,7 @@ class RunRecord:
     log: str = ""
     machine: str = ""
     cells: int = 0  # mesh size from checkMesh (0 = not meshed yet)
+    mesh_warnings: list[str] = field(default_factory=list)  # checkMesh quality warnings the run was allowed to pass
 
 
 def coarse_first_order(n: int) -> list[int]:

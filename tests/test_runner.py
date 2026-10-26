@@ -19,7 +19,7 @@ from solver import run_openfoam
 from solver.foam.geometry import prepare_model
 from solver.foam.queue import RunRecord, load_queue, save_queue
 from solver.foam.runner import (EXIT_MARKER, FORCE_SEP, FoamContainer, RunContext, RunnerError,
-                                SubprocessExecutor, mesh_cell_count, run_batch, run_one, stop_flag)
+                                SubprocessExecutor, check_mesh_log, mesh_cell_count, run_batch, run_one, stop_flag)
 from solver.foam.settings import load_settings
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -44,11 +44,11 @@ def noisy(it):  # drag swings +-10%: never converges
 class FakeExecutor:
     """Pretends to be docker + a container. `scenario(it) -> (drag, lift)` shapes the force history."""
 
-    def __init__(self, scenario=steady, bad_mesh=False, fatal_runs=(), on_poll=None, docker_ok=True, cells=1234):
+    def __init__(self, scenario=steady, bad_mesh=False, fatal_runs=(), on_poll=None, docker_ok=True, cells=1234, mesh_log=None):
         self.calls: list[list[str]] = []
         self.files: dict[tuple[str, str], str] = {}  # (run_id, rel_path) -> text
         self.scenario, self.bad_mesh, self.fatal_runs, self.on_poll = scenario, bad_mesh, set(fatal_runs), on_poll
-        self.docker_ok, self.cells = docker_ok, cells
+        self.docker_ok, self.cells, self.mesh_log = docker_ok, cells, mesh_log
         self.cases: set[str] = set()
         self.segments: dict[str, list[tuple[int, list[str]]]] = {}  # run -> [(start_time, rows)]
         self.iter: dict[str, int] = {}
@@ -143,7 +143,8 @@ class FakeExecutor:
             return self._cp(1)
 
         if "blockMesh" in script:
-            files[(run, "log.checkMesh")] = "Failed 2 mesh checks." if self.bad_mesh else CHECKMESH_LOG.format(cells=self.cells)
+            files[(run, "log.checkMesh")] = (self.mesh_log if self.mesh_log is not None else "Failed 2 mesh checks." if self.bad_mesh
+                                             else CHECKMESH_LOG.format(cells=self.cells))
             return self._cp(1 if self.bad_mesh else 0)
         if "decomposePar" in script:
             files[(run, "processor0")] = ""
@@ -321,7 +322,8 @@ def test_converged_run_is_done_instant(tmp_path, models):
     assert info == {"run_id": "airplane_d0", "obj_id": "airplane", "direction_index": 0,
                     "direction_deg": OBJECTS["airplane"].directions_deg[0],
                     "speed_m_s": OBJECTS["airplane"].speed_m_s, "iterations": rec.iterations,
-                    "converged": True, "fields": "instant", "status": "done", "cells": 1234}
+                    "converged": True, "fields": "instant", "status": "done", "cells": 1234,
+                    "mesh_warnings": []}
     assert list((tmp_path / "full/airplane/airplane_d0/result/VTK").glob("*.vtm"))
     assert (tmp_path / "full/airplane/airplane_d0/result/postProcessing").is_dir()
     assert ex.count("rm -rf /cases/full/airplane_d0") == 2  # once before the fresh copy, once after export
@@ -731,3 +733,50 @@ def test_short_real_run(tmp_path):
     finally:
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
         subprocess.run(["docker", "volume", "rm", settings.volume], capture_output=True)
+
+
+# --- checkMesh pass rule: quality-only warnings are accepted, hard errors fail ---
+
+F1_CHECKMESH = (Path(__file__).parent / "f1_checkMesh_sample.log").read_text()  # a real F1 run (direction 4)
+
+
+def test_check_mesh_log_real_f1_sample_passes_with_one_skewness_warning():
+    ok, warnings = check_mesh_log(F1_CHECKMESH)
+    assert ok and len(warnings) == 1
+    assert warnings[0].startswith("Max skewness = 4.23446") and not warnings[0].startswith("*")
+
+
+def test_check_mesh_log_mesh_ok_has_no_warnings():
+    assert check_mesh_log(CHECKMESH_LOG.format(cells=10)) == (True, [])
+
+
+def test_check_mesh_log_hard_errors_fail():
+    ok, errs = check_mesh_log("    Cell volumes\n ***Zero or negative cell volume detected\n\nFailed 1 mesh checks.\n")
+    assert not ok and errs == ["Zero or negative cell volume detected"]
+    mixed = F1_CHECKMESH.replace("Failed 1 mesh checks.", " ***Error in face pyramids: 3 faces pyramids are incorrectly oriented\n\nFailed 2 mesh checks.")
+    ok, errs = check_mesh_log(mixed)
+    assert not ok and errs == ["Error in face pyramids: 3 faces pyramids are incorrectly oriented"]
+
+
+def test_check_mesh_log_without_ok_or_warnings_fails():
+    assert check_mesh_log("") == (False, [])
+    assert check_mesh_log("Failed 2 mesh checks.") == (False, [])
+
+
+def test_runner_continues_past_quality_warnings_and_records_them(tmp_path, models):
+    ex = FakeExecutor(mesh_log=F1_CHECKMESH)
+    said = []
+    ctx = replace(make_ctx(tmp_path, models, ex), say=said.append)
+    rec = run_one(waiting(), ctx)
+    assert rec.status == "done" and ex.count("decomposePar") == 1
+    assert any("WARNING" in m and "skewness" in m for m in said)
+    info = json.loads((tmp_path / "full/airplane/airplane_d0/result/run.json").read_text())
+    assert len(info["mesh_warnings"]) == 1 and "skewness" in info["mesh_warnings"][0]
+
+
+def test_runner_still_fails_on_a_hard_mesh_error(tmp_path, models):
+    ex = FakeExecutor(mesh_log=" ***Zero or negative cell volume detected\n\nFailed 1 mesh checks.\n")
+    ctx = make_ctx(tmp_path, models, ex)
+    rec = run_one(waiting(), ctx)
+    assert rec.status == "failed" and "negative cell volume" in rec.log
+    assert ex.count("decomposePar") == 0
