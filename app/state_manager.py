@@ -1,12 +1,45 @@
 """
-In-Memory State Manager and Linear Interpolation Engine.
-Loads pre-computed CFD states from .npz bundles into RAM for instant (<1ms) switching.
-Implements IGCSE 0606 Linear Interpolation between discrete wind speeds.
+In-Memory State Manager and Linear Interpolation Engine (cache format v2).
+
+Loads one object's OpenFOAM results (assets/cache/<obj>_states.npz) fully into RAM, decoding every
+JSON entry once at load time, so that `get_state` is a handful of numpy operations (well under 1 ms).
+
+The visitor controls two things:
+  * the smoke-wand height, one of 10 discrete steps (the macropad buttons);
+  * the wind direction, a continuous knob in [0, 1] mapped onto the object's direction sweep.
+
+Maths link (IGCSE 0606): the knob maps to a direction by a straight line,
+    d = d_min + knob * (d_max - d_min),
+and a direction between two solved directions d1 < d < d2 is blended by linear interpolation,
+    t = (d - d1) / (d2 - d1)  in [0, 1],     y = (1 - t) * y1 + t * y2,
+applied to the surface pressure, the telemetry numbers and the Navier-Stokes terms.
 """
 
-from pathlib import Path
+from __future__ import annotations
+
 import json
+from pathlib import Path
+
 import numpy as np
+
+from app.cache_format import read_cache, state_key, wand_key
+
+
+def _is_number(value) -> bool:
+    """True for int/float values that are not bool (bool is a subclass of int in Python)."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _blend_numbers(a: dict, b: dict, t: float, nearest: dict) -> dict:
+    """y = (1 - t) * y1 + t * y2 for numeric entries; everything else comes from `nearest`."""
+    out = {}
+    for key, v_near in nearest.items():
+        v1, v2 = a.get(key), b.get(key)
+        if _is_number(v1) and _is_number(v2):
+            out[key] = (1.0 - t) * float(v1) + t * float(v2)
+        else:
+            out[key] = v_near
+    return out
 
 
 class ObjectStateManager:
@@ -18,89 +51,103 @@ class ObjectStateManager:
         if not self.cache_file.exists():
             raise FileNotFoundError(
                 f"Cache file {self.cache_file} not found. "
-                f"Please run 'python3 solver/batch_precompute.py' first."
+                f"Please run 'python3 solver/import_results.py' first."
             )
 
-        # Load NPZ into memory
-        self.data = np.load(self.cache_file, allow_pickle=True)
-        self.z_steps = self.data["z_steps"]
-        self.wind_speeds = self.data["wind_speeds"]
-        self.mesh_vertices = self.data["mesh_vertices"]
-        self.mesh_faces = self.data["mesh_faces"]
-        self.obj_config = json.loads(str(self.data["config_json"]))
+        # Raises ValueError for a v1 (or any non-v2) cache.
+        data = read_cache(self.cache_file)
 
-        # Cache decoded metrics and arrays for zero-latency retrieval
-        self.state_cache = {}
-        for z_i in range(len(self.z_steps)):
-            for v_i in range(len(self.wind_speeds)):
-                k = f"z{z_i}_v{v_i}"
-                metrics = json.loads(str(self.data[f"{k}_metrics"]))
-                pressure = self.data[f"{k}_pressure"]
-                streamlines = self.data[f"{k}_streamlines"]
-                self.state_cache[k] = {
-                    "metrics": metrics,
-                    "pressure": pressure,
-                    "streamlines": streamlines
-                }
+        self.directions_deg = np.asarray(data["directions_deg"], dtype=float)
+        self.wand_heights = np.asarray(data["wand_heights"], dtype=float)
+        self.view_bounds = np.asarray(data["view_bounds"], dtype=float)
+        self.mesh_vertices = data["mesh_vertices"]
+        self.mesh_faces = data["mesh_faces"]
+        self.obj_config = json.loads(data["config_json"])
+        self.wind_speed = float(self.obj_config["cfd"]["speed_m_s"])
 
-    def get_state(self, z_step_index: int, wind_speed: float) -> dict:
+        n_dir, n_wand = len(self.directions_deg), len(self.wand_heights)
+        wind_vectors = np.asarray(data["wind_vectors"], dtype=float)
+
+        # Decode everything now so get_state never touches JSON or the npz file.
+        self._wind_vectors = wind_vectors
+        self._metrics = []
+        self._ns_terms = []
+        self._pressure = []
+        self._wands = []  # _wands[d][w] = (lines, k, dominant)
+        for d in range(n_dir):
+            s = state_key(d)
+            self._metrics.append(json.loads(data[f"{s}_metrics"]))
+            self._ns_terms.append(json.loads(data[f"{s}_ns_terms"]))
+            self._pressure.append(np.asarray(data[f"{s}_pressure"]))
+            self._wands.append([
+                (
+                    data[f"{wand_key(d, w)}_lines"],
+                    data[f"{wand_key(d, w)}_k"],
+                    data[f"{wand_key(d, w)}_dominant"],
+                )
+                for w in range(n_wand)
+            ])
+
+    def direction_for_knob(self, knob: float) -> float:
+        """Straight-line map d = d_min + knob * (d_max - d_min), with the knob clamped to [0, 1]."""
+        k = min(max(float(knob), 0.0), 1.0)
+        d_min, d_max = self.directions_deg[0], self.directions_deg[-1]
+        return float(d_min + k * (d_max - d_min))
+
+    def _bracket(self, direction: float) -> tuple[int, int, float]:
+        """Indices (i1, i2) of the solved directions around `direction`, and t = (d - d1)/(d2 - d1)."""
+        dirs = self.directions_deg
+        last = len(dirs) - 1
+        i1 = int(np.searchsorted(dirs, direction, side="right")) - 1
+        i1 = min(max(i1, 0), last)
+        if i1 == last:  # at (or past) the upper end: the last direction itself, t = 0
+            return last, last, 0.0
+        i2 = i1 + 1
+        t = (direction - dirs[i1]) / (dirs[i2] - dirs[i1])
+        return i1, i2, float(min(max(t, 0.0), 1.0))
+
+    def get_state(self, wand_index: int, knob: float) -> dict:
         """
-        Retrieves the CFD state for a given discrete Z-step index (0..9)
-        and continuous wind speed (V), using IGCSE 0606 Linear Interpolation:
-           y = (1 - t)*y1 + t*y2,  where t = (V - V1) / (V2 - V1)
+        State for smoke-wand `wand_index` (0..9) and wind-direction `knob` (0..1).
+
+        Surface pressure, telemetry metrics and N-S terms use IGCSE 0606 linear interpolation
+        between the two bracketing solved directions:
+            t = (d - d1) / (d2 - d1),   y = (1 - t) * y1 + t * y2.
+        Streamlines, k, dominant-term colouring and `filled` come from the nearest direction
+        (t > 0.5 picks d2), since lines cannot be blended point by point.
         """
-        z_idx = np.clip(z_step_index, 0, len(self.z_steps) - 1)
-        z_val = float(self.z_steps[z_idx])
+        w = min(max(int(wand_index), 0), len(self.wand_heights) - 1)
+        d = self.direction_for_knob(knob)
+        i1, i2, t = self._bracket(d)
+        near = i2 if t > 0.5 else i1
 
-        # Clamp wind speed within range
-        ws = float(np.clip(wind_speed, self.wind_speeds[0], self.wind_speeds[-1]))
+        # 1. Surface pressure: y = (1 - t) * p1 + t * p2 (one numpy expression over all vertices).
+        pressure = (1.0 - t) * self._pressure[i1] + t * self._pressure[i2]
 
-        # Find adjacent velocity indices
-        if ws <= self.wind_speeds[0]:
-            v1_idx, v2_idx = 0, 0
-            t = 0.0
-        elif ws >= self.wind_speeds[-1]:
-            v1_idx = len(self.wind_speeds) - 1
-            v2_idx = v1_idx
-            t = 0.0
-        else:
-            v1_idx = int(np.searchsorted(self.wind_speeds, ws) - 1)
-            v2_idx = v1_idx + 1
-            v1 = self.wind_speeds[v1_idx]
-            v2 = self.wind_speeds[v2_idx]
-            t = (ws - v1) / (v2 - v1)  # Linear fraction in [0, 1]
+        # 2. Telemetry and Navier-Stokes terms, blended number by number.
+        metrics = _blend_numbers(self._metrics[i1], self._metrics[i2], t, self._metrics[near])
+        ns_terms = _blend_numbers(self._ns_terms[i1], self._ns_terms[i2], t, self._ns_terms[near])
 
-        state1 = self.state_cache[f"z{z_idx}_v{v1_idx}"]
-        state2 = self.state_cache[f"z{z_idx}_v{v2_idx}"]
+        # 3. Wind direction in the model frame: blend the two unit vectors, then renormalise.
+        vec = (1.0 - t) * self._wind_vectors[i1] + t * self._wind_vectors[i2]
+        norm = float(np.linalg.norm(vec))
+        wind_vector = vec / norm if norm > 0.0 else self._wind_vectors[near].copy()
 
-        # 1. Linearly interpolate surface pressure
-        p1 = state1["pressure"]
-        p2 = state2["pressure"]
-        interp_pressure = (1.0 - t) * p1 + t * p2
-
-        # 2. Linearly interpolate telemetry metrics
-        m1 = state1["metrics"]
-        m2 = state2["metrics"]
-        interp_metrics = {}
-        for key in m1:
-            val1 = m1[key]
-            val2 = m2[key]
-            if isinstance(val1, (int, float)):
-                interp_metrics[key] = (1.0 - t) * float(val1) + t * float(val2)
-            else:
-                interp_metrics[key] = val1
-
-        # Use nearest velocity streamlines for 3D trajectory
-        active_streamlines = state2["streamlines"] if t > 0.5 else state1["streamlines"]
-
+        lines, k, dominant = self._wands[near][w]
         return {
-            "z_index": int(z_idx),
-            "z_val": float(z_val),
-            "wind_speed": float(ws),
-            "metrics": interp_metrics,
-            "surface_pressure": interp_pressure,
-            "streamlines": active_streamlines,
+            "wand_index": w,
+            "wand_z": float(self.wand_heights[w]),
+            "direction_deg": d,
+            "wind_speed": self.wind_speed,
+            "wind_vector": wind_vector,
+            "metrics": metrics,
+            "ns_terms": ns_terms,
+            "surface_pressure": pressure,
+            "lines": lines,
+            "k": k,
+            "dominant": dominant,
+            "filled": self._metrics[near].get("filled_from") is not None,
             "mesh_vertices": self.mesh_vertices,
             "mesh_faces": self.mesh_faces,
-            "obj_config": self.obj_config
+            "obj_config": self.obj_config,
         }
