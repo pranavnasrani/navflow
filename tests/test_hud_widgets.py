@@ -290,3 +290,43 @@ def test_overlay_simple_view_hides_the_extra_lines(qapp):
     assert visible == [False] * (len(visible) - 1) + [True]
     tower.set_detailed(True)
     assert all(row[0].isHidden() is False for row in tower._table_cells)
+
+
+def test_mission_value_total_push_is_pythagoras():
+    from app.explainers import mission_value
+
+    assert abs(mission_value("total_push_mn", {"drag_force_n": 3e6, "side_force_n": 4e6}) - 5.0) < 1e-12
+    assert mission_value("lift_to_drag", {"lift_to_drag": 6.25}) == 6.25
+
+
+def test_mission_panel_reads_the_line_and_says_when_found(qapp):
+    from app.explainers import MISSIONS
+    from app.hud_widgets import MissionPanel
+
+    panel = MissionPanel(MISSIONS["airplane"])
+    panel.set_curve([0, 2, 4, 6, 8], [1.0, 3.0, 5.0, 6.0, 5.5])
+    assert panel.best_direction == 6.0
+
+    assert panel.update_direction(3.0) is False  # halfway between 2 and 4: y = (3 + 5) / 2
+    assert panel.value.text() == "4.0"
+    assert "clockwise" in panel.hint.text() and "anticlockwise" not in panel.hint.text()
+
+    assert panel.update_direction(6.9) is True  # within half a step (1 degree) of the best run
+    assert panel.hint.text() == MISSIONS["airplane"].found
+
+    assert panel.update_direction(6.0, show_mode=True) is False  # the show never celebrates
+    assert "Watch" in panel.hint.text()
+
+
+def test_every_mission_answer_matches_its_message():
+    """The "You found it!" text names the angle; it must be the angle the solved results give."""
+    import json
+
+    from app.cache_format import read_cache
+    from app.explainers import MISSIONS, mission_value
+
+    for obj, m in MISSIONS.items():
+        c = read_cache(f"assets/cache/{obj}_states.npz")
+        ys = [mission_value(m.kind, json.loads(c[f"d{i}_metrics"])) for i in range(len(c["directions_deg"]))]
+        best = int(np.argmax(ys) if m.goal == "max" else np.argmin(ys))
+        assert f"{c['directions_deg'][best]:g}°" in m.found, obj

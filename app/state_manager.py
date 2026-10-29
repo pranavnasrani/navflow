@@ -131,6 +131,10 @@ class ObjectStateManager:
         t = (direction - dirs[i1]) / (dirs[i2] - dirs[i1])
         return i1, i2, float(min(max(t, 0.0), 1.0))
 
+    def solved_metrics(self) -> list[dict]:
+        """The metrics of every solved direction, in direction order (already decoded, no copy)."""
+        return list(self._metrics)
+
     def wand_lines(self, direction_index: int) -> list[np.ndarray]:
         """The streamlines of all 10 wand heights for one solved direction (already in RAM, no copy)."""
         return [entry[0] for entry in self._wands[int(direction_index)]]

@@ -7,6 +7,7 @@ HUD building blocks for the monitor windows (native Qt widgets, no web content).
   * `NsTermsPanel`              the equation  rho (v.grad)v = -grad p + mu laplacian(v)  with one bar per term.
   * `SustainabilityOverlay`     the fuel / CO2, top-speed and wind-load lines with their UN SDG tag.
   * `rainbow_cmap`              the banded blue-to-red colour scale of the results window.
+  * `MissionPanel`              the visitor's challenge: a question, one big number and a graph of all nine runs.
 
 Maths link (IGCSE 0606): logarithms (the bars), linear interpolation (the tracers), the cube root and
 the squared-speed rule (the sustainability numbers, derived in solver/foam/sustainability.py).
@@ -17,8 +18,9 @@ import math
 
 import numpy as np
 import pyvista as pv
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QFrame, QGridLayout, QLabel, QProgressBar, QVBoxLayout, QWidget
+from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
+from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QProgressBar, QSizePolicy, QVBoxLayout, QWidget
 
 # --------------------------------------------------------------------------------------------------
 # Colours. Three fixed colours name the three Navier-Stokes terms everywhere (bars, streamlines in
@@ -519,3 +521,172 @@ def colorbar_ticks(lo: float, hi: float, log: bool, n_linear: int = 5) -> list[t
         return [((math.log10(v) - a) / (b - a), compact_si(v)) for v in mids]
     fracs = (0.0, 0.5, 1.0) if n_linear <= 3 else (0.0, 0.25, 0.5, 0.75, 1.0)
     return [(f, compact_si(lo + f * (hi - lo))) for f in fracs]
+
+
+# --------------------------------------------------------------------------------------------------
+# The visitor's challenge
+# --------------------------------------------------------------------------------------------------
+LINE_BLUE = "#2563EB"
+DOT_ORANGE = "#EA580C"
+FOUND_GREEN = "#16A34A"
+
+
+class MissionChart(QWidget):
+    """The challenge's quantity against direction: one dot per solved run, straight lines between them, and a
+    big orange dot for where the knob is now.
+
+    Maths link (IGCSE 0606): between two runs the graph is a straight line, y = (1 - t) y1 + t y2 with
+    t = (d - d1) / (d2 - d1), which is exactly how the app blends the results as the knob turns; the
+    orange dot slides along that line. Points map to the screen by a linear scale on each axis.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.xs: list[float] = []
+        self.ys: list[float] = []
+        self.best: int | None = None
+        self.current: tuple[float, float] | None = None
+        self.reveal = False
+        self.decimals = 1
+        self.setMinimumHeight(130)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    def set_curve(self, xs, ys, best: int | None, decimals: int = 1) -> None:
+        self.xs, self.ys, self.best, self.decimals = [float(x) for x in xs], [float(y) for y in ys], best, decimals
+        self.update()
+
+    def set_current(self, x: float, y: float, reveal: bool) -> None:
+        self.current, self.reveal = (float(x), float(y)), bool(reveal)
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        if len(self.xs) < 2:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        fpx = max(9, int(h * 0.085))
+        p.setFont(QFont("Arial", fpx))
+        left, right, top, bottom = 4.2 * fpx, 10.0, 1.4 * fpx, 2.0 * fpx
+        x0, x1 = self.xs[0], self.xs[-1]
+        lo, hi = min(self.ys), max(self.ys)
+        pad = 0.12 * (hi - lo or 1.0)
+        lo, hi = lo - pad, hi + pad
+
+        def px(x: float) -> float:  # linear scale: x0 -> left edge, x1 -> right edge
+            return left + (x - x0) / (x1 - x0) * (w - left - right)
+
+        def py(y: float) -> float:
+            return top + (1.0 - (y - lo) / (hi - lo)) * (h - top - bottom)
+
+        # axes and their end labels
+        p.setPen(QPen(QColor(RULE), 1.0))
+        p.drawLine(QPointF(left, h - bottom), QPointF(w - right, h - bottom))
+        p.drawLine(QPointF(left, top), QPointF(left, h - bottom))
+        p.setPen(QColor(MUTED))
+        fmt = f"{{:.{self.decimals}f}}"
+        for y in (min(self.ys), max(self.ys)):
+            p.drawText(QRectF(0, py(y) - fpx, left - 6, 2 * fpx), Qt.AlignRight | Qt.AlignVCenter, fmt.format(y))
+        for x in (x0, self.xs[len(self.xs) // 2], x1):
+            p.drawText(QRectF(px(x) - 3 * fpx, h - bottom + 2, 6 * fpx, bottom), Qt.AlignHCenter | Qt.AlignTop, f"{x:g}°")
+
+        # the nine runs, joined by straight lines
+        path = QPainterPath(QPointF(px(self.xs[0]), py(self.ys[0])))
+        for x, y in zip(self.xs[1:], self.ys[1:]):
+            path.lineTo(QPointF(px(x), py(y)))
+        p.setPen(QPen(QColor(LINE_BLUE), 2.5))
+        p.setBrush(Qt.NoBrush)
+        p.drawPath(path)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(LINE_BLUE))
+        for x, y in zip(self.xs, self.ys):
+            p.drawEllipse(QPointF(px(x), py(y)), 3.5, 3.5)
+
+        # the answer, once found
+        if self.reveal and self.best is not None:
+            bx, by = px(self.xs[self.best]), py(self.ys[self.best])
+            p.setPen(QPen(QColor(FOUND_GREEN), 3.0))
+            p.setBrush(Qt.NoBrush)
+            p.drawEllipse(QPointF(bx, by), 10.0, 10.0)
+
+        # where the knob is now
+        if self.current is not None:
+            cx, cy = px(min(max(self.current[0], x0), x1)), py(self.current[1])
+            p.setPen(QPen(QColor(DOT_ORANGE), 1.2, Qt.DashLine))
+            p.drawLine(QPointF(cx, top), QPointF(cx, h - bottom))
+            p.setPen(QPen(QColor("white"), 2.0))
+            p.setBrush(QColor(DOT_ORANGE))
+            p.drawEllipse(QPointF(cx, cy), 7.5, 7.5)
+        p.end()
+
+
+class MissionPanel(QFrame):
+    """Question, big live number, graph of all nine runs, and a hint that turns into "You found it!"."""
+
+    def __init__(self, mission, parent=None):
+        super().__init__(parent)
+        self.mission = mission
+        self.found = False
+        self._xs: np.ndarray = np.zeros(0)
+        self._ys: np.ndarray = np.zeros(0)
+        self._best = 0
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+
+        self.question = _role(QLabel(mission.question), "mission")
+        self.question.setWordWrap(True)
+        lay.addWidget(self.question)
+
+        row = QHBoxLayout()
+        row.addWidget(_role(QLabel(mission.label), "key"), alignment=Qt.AlignBottom)
+        row.addStretch()
+        self.value = _role(QLabel("—"), "hero")
+        row.addWidget(self.value, alignment=Qt.AlignBottom)
+        lay.addLayout(row)
+
+        self.chart = MissionChart()
+        lay.addWidget(self.chart)
+        self.chart_note = _role(QLabel("● one full simulation    ━ straight line between them    ● you"), "small")
+        lay.addWidget(self.chart_note)
+
+        self.hint = _role(QLabel(""), "hint")
+        self.hint.setWordWrap(True)
+        lay.addWidget(self.hint)
+
+    def set_curve(self, xs, ys) -> None:
+        self._xs, self._ys = np.asarray(xs, dtype=float), np.asarray(ys, dtype=float)
+        self._best = int(np.argmax(self._ys) if self.mission.goal == "max" else np.argmin(self._ys))
+        self.chart.set_curve(self._xs, self._ys, self._best, self.mission.decimals)
+
+    @property
+    def best_direction(self) -> float:
+        return float(self._xs[self._best])
+
+    def update_direction(self, direction: float, show_mode: bool = False) -> bool:
+        """Move the dot to `direction` and return True if the visitor is on the answer.
+
+        The number is read off the straight line between the two neighbouring runs (np.interp is
+        y = (1 - t) y1 + t y2), so the big number and the dot always agree. "On the answer" means within
+        half a step of the best run: |d - d_best| <= (d2 - d1) / 2.
+        """
+        if self._xs.size < 2:
+            return False
+        y = float(np.interp(direction, self._xs, self._ys))
+        unit = f" {self.mission.unit}" if self.mission.unit else ""
+        self.value.setText(f"{y:,.{self.mission.decimals}f}{unit}")
+        half_step = 0.5 * float(np.min(np.diff(self._xs)))
+        self.found = abs(direction - self.best_direction) <= half_step + 1e-9
+        self.chart.set_current(direction, y, reveal=self.found and not show_mode)
+        if show_mode:
+            self.hint.setText("Watch the orange dot move along the graph as the wind turns.")
+            self.hint.setProperty("found", False)
+        elif self.found:
+            self.hint.setText(self.mission.found)
+            self.hint.setProperty("found", True)
+        else:
+            turn = "clockwise ↻" if direction < self.best_direction else "anticlockwise ↺"
+            self.hint.setText(f"{self.mission.better}  Try turning the knob {turn}.")
+            self.hint.setProperty("found", False)
+        _repolish(self.hint)
+        return self.found and not show_mode

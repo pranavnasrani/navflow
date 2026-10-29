@@ -50,6 +50,7 @@ from app.hud_widgets import (
     TERM_LABELS,
     TERM_NAMES,
     TEXT,
+    MissionPanel,
     NsTermsPanel,
     SustainabilityOverlay,
     hex_to_rgb,
@@ -59,7 +60,7 @@ from app.hud_widgets import (
     wind_arrow_geometry,
 )
 from app.input_controller import ExhibitionInputController
-from app.explainers import HIGH_LABEL, LOW_LABEL, caption_for
+from app.explainers import HIGH_LABEL, LOW_LABEL, MISSIONS, caption_for, mission_value
 from app.state_manager import ObjectStateManager
 
 VIEW_NAMES = (
@@ -140,6 +141,10 @@ def panel_style(s: float) -> str:
     QLabel[role="value"] {{ font-size: {px(16)}px; font-weight: 700; }}
     QLabel[role="big"] {{ font-size: {px(21)}px; font-weight: 700; }}
     QLabel[role="small"] {{ font-size: {px(13)}px; color: {MUTED}; }}
+    QLabel[role="mission"] {{ font-size: {px(22)}px; font-weight: 700; color: {TEXT}; }}
+    QLabel[role="hero"] {{ font-size: {px(46)}px; font-weight: 700; color: #EA580C; }}
+    QLabel[role="hint"] {{ font-size: {px(15)}px; color: #1E3A8A; background-color: #DBEAFE; padding: {px(8)}px {px(10)}px; }}
+    QLabel[role="hint"][found="true"] {{ color: #14532D; background-color: #DCFCE7; font-weight: 700; }}
     QLabel[role="equation"] {{ font-size: {px(22)}px; font-family: "STIX Two Text", "Times New Roman"; }}
     QLabel[role="term"] {{ font-size: {px(14)}px; font-weight: 700; }}
     QLabel[role="termValue"] {{ font-size: {px(15)}px; }}
@@ -198,6 +203,10 @@ class MonitorWindow(QMainWindow):
         self.orbit_timer = QTimer(self)  # runs only while the idle show runs
         self.orbit_timer.setInterval(50)
         self.orbit_timer.timeout.connect(self._orbit_tick)
+        self.celebrate_timer = QTimer(self)  # how long "You found it!" stays on the 3D view
+        self.celebrate_timer.setSingleShot(True)
+        self.celebrate_timer.setInterval(6000)
+        self.celebrate_timer.timeout.connect(self._end_celebration)
 
         # No animation loop: the scene is drawn when something changes, so an idle exhibit costs no GPU.
         # (The timer is kept, stopped, for tools that expect it.)
@@ -256,7 +265,18 @@ class MonitorWindow(QMainWindow):
         lay.addWidget(self.lbl_direction)
         lay.addWidget(self.lbl_wand)
 
-        section("Forces")
+        # The visitor's challenge (app/explainers.py MISSIONS): the first thing in the panel
+        self.mission = MISSIONS.get(self.obj_id)
+        self.mission_panel = None
+        self._mission_found = False
+        if self.mission is not None:
+            section("Your challenge")
+            self.mission_panel = MissionPanel(self.mission)
+            dirs = self.state_mgr.directions_deg
+            self.mission_panel.set_curve(dirs, [mission_value(self.mission.kind, m) for m in self.state_mgr.solved_metrics()])
+            lay.addWidget(self.mission_panel)
+
+        self._detail_only += section("Forces")
         grid = QGridLayout()
         grid.setHorizontalSpacing(16)
         grid.setVerticalSpacing(5)
@@ -272,8 +292,7 @@ class MonitorWindow(QMainWindow):
             val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             grid.addWidget(val, r, 2 * c + 1)
             self.force_values[key] = val
-            if r > 0:  # drag and lift stay in the simple panel; Cd, Cl, area and Re are detail
-                self._detail_only += [key_lb, val]
+            self._detail_only += [key_lb, val]  # the challenge's number stands in for these in the simple panel
         grid.setColumnStretch(1, 1)
         grid.setColumnStretch(3, 1)
         lay.addLayout(grid)
@@ -294,8 +313,11 @@ class MonitorWindow(QMainWindow):
         widgets = tuple(self.cfd_cfg.get("widgets", ()))
         self.overlay = SustainabilityOverlay(widgets)
         if widgets:
-            section("Wind load on the tower" if "wind_load" in widgets else "Sustainability")
+            self._detail_only += section("Wind load on the tower" if "wind_load" in widgets else "Sustainability")
             lay.addWidget(self.overlay)
+            self._detail_only.append(self.overlay)
+        self.lbl_sdg = label(self.overlay._sdg_text(), "small")  # the SDG tag stays in the simple panel
+        lay.addWidget(self.lbl_sdg)
 
         # Honest note when this direction was copied from the nearest simulated one
         self.lbl_filled = label("", "warn", wrap=True)
@@ -580,7 +602,34 @@ class MonitorWindow(QMainWindow):
             self.lbl_filled.hide()
 
         self.overlay.set_metrics(metrics, state.get("worst_direction_deg"))
+        self._direction = float(state["direction_deg"])
+        self._update_mission()
         self.plotter.render()
+
+    def _update_mission(self) -> None:
+        """Move the challenge's dot; the moment a visitor reaches the answer, say so on the 3D view too."""
+        if self.mission_panel is None:
+            return
+        found = self.mission_panel.update_direction(getattr(self, "_direction", 0.0), show_mode=self._show)
+        if found and not self._mission_found:
+            self.txt_caption.SetInput(self._two_lines(self.mission.found))
+            self.txt_caption.SetVisibility(True)
+            self.celebrate_timer.start()
+        self._mission_found = found
+
+    def _end_celebration(self) -> None:
+        if not self._show:
+            self.txt_caption.SetVisibility(False)
+            self.plotter.render()
+
+    @staticmethod
+    def _two_lines(text: str) -> str:
+        """Two balanced lines at most: break at the space nearest the middle."""
+        if len(text) <= 56:
+            return text
+        mid = len(text) // 2
+        cut = min((i for i, ch in enumerate(text) if ch == " "), key=lambda i: abs(i - mid))
+        return text[:cut] + "\n" + text[cut + 1:]
 
     def _make_callout(self, text: str, color: str, above: bool) -> dict:
         """A label with a dot and a leader line, all 2D actors; _reproject_callouts keeps them on a 3D point."""
@@ -659,6 +708,8 @@ class MonitorWindow(QMainWindow):
         self._show = bool(active)
         self.txt_hint.SetInput(self._hint_text(self.detailed))
         self.txt_caption.SetVisibility(self._show)
+        self._mission_found = False
+        self._update_mission()
         if self._show:
             self._fit_camera()
             self._orbit_angle, self._orbit_t0 = 0.0, time.monotonic()
@@ -671,13 +722,7 @@ class MonitorWindow(QMainWindow):
 
     def on_show_step(self, step: int) -> None:
         self._show_step = int(step)
-        text = caption_for(self.obj_id, step)
-        # two balanced lines at most: break at the space nearest the middle
-        if len(text) > 56:
-            mid = len(text) // 2
-            cut = min((i for i, ch in enumerate(text) if ch == " "), key=lambda i: abs(i - mid))
-            text = text[:cut] + "\n" + text[cut + 1:]
-        self.txt_caption.SetInput(text)
+        self.txt_caption.SetInput(self._two_lines(caption_for(self.obj_id, step)))
         self.plotter.render()
 
     def _orbit_tick(self) -> None:
@@ -727,6 +772,7 @@ class MonitorWindow(QMainWindow):
         if not self.obj_cfg.get("info_card"):
             self.lbl_info.setVisible(False)
         self.overlay.set_detailed(self.detailed)
+        self.lbl_sdg.setVisible(not self.detailed and bool(self.lbl_sdg.text()))
         self.ns_panel.caption.setVisible(self.detailed and self.height() >= 820)
         self.txt_hint.SetInput(self._hint_text(self.detailed))
         self.plotter.render()
