@@ -114,6 +114,16 @@ def test_nearest_lines(manager):
     assert manager.get_state(-4, 0.5)["wand_index"] == 0
 
 
+def test_speed_along_lines_is_optional(manager, tmp_path):
+    # An older cache has no speed: the state says None rather than inventing one.
+    assert manager.get_state(3, 0.5)["speed"] is None
+    write_fake_cache(tmp_path / "s" / "f1_car_states.npz", _object_config("f1_car"), with_speed=True)
+    mgr = ObjectStateManager("f1_car", cache_dir=tmp_path / "s")
+    st = mgr.get_state(3, _knob_between(mgr, 2, 3, 0.6))  # nearest direction 3, like the lines
+    assert st["speed"].shape == st["k"].shape
+    assert np.nanmin(st["speed"]) == 300.0
+
+
 def test_filled_and_non_numeric_metrics_come_from_nearest(tmp_path):
     cfg = {"id": "building", "cfd": {"speed_m_s": 50.0, "widgets": ["wind_load"]}}
     write_fake_cache(tmp_path / "building_states.npz", cfg)
@@ -256,6 +266,24 @@ def test_tab_cycles_view():
     tab = QKeyEvent(QEvent.KeyPress, Qt.Key_Tab, Qt.NoModifier)
     assert ctrl.handle_key_press(tab) is True
     assert ctrl.current_view == 1 and views == [1]
+
+
+def test_space_toggles_detail_and_r_resets_camera():
+    ctrl = ExhibitionInputController()
+    seen, resets = [], []
+    ctrl.detail_changed.connect(seen.append)
+    ctrl.camera_reset.connect(lambda: resets.append(1))
+    assert ctrl.detailed is False  # visitors start on the simple strip
+    for key in (Qt.Key_Space, Qt.Key_Space, Qt.Key_R):
+        assert ctrl.handle_key_press(QKeyEvent(QEvent.KeyPress, key, Qt.NoModifier))
+    assert seen == [True, False] and resets == [1]
+
+
+def test_wand_lines_returns_all_heights_of_one_direction(manager):
+    lines = manager.wand_lines(0)
+    assert len(lines) == len(manager.wand_heights)
+    state = manager.get_state(3, 0.0)
+    assert state["direction_index"] == 0 and lines[3] is state["lines"]
 
 
 def test_navier_stokes_divergence():

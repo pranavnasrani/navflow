@@ -44,7 +44,11 @@
         "base_rotation_deg": [
           0,
           0,
-          0
+          90
+        ],
+        "surface_refinement": [
+          6,
+          7
         ],
         "rotation_axis": "y",
         "directions_deg": [
@@ -65,11 +69,11 @@
         "cruise": {
           "density_kg_m3": 0.364,
           "speed_m_s": 250.0,
-          "altitude_km": 11
+          "altitude_km": 11,
+          "mass_kg": 500000
         },
         "widgets": [
-          "fuel",
-          "speed"
+          "fuel"
         ]
       }
     },
@@ -85,12 +89,12 @@
       "description": "High-downforce open-wheel racer. Demonstrates how managing frontal stagnation zones and diffuser flow cuts drag power dramatically while maintaining cornering grip.",
       "cfd": {
         "speed_m_s": 40.0,
-        "real_size_m": 5.6,
+        "real_size_m": 5.4,
         "size_axis": "x",
         "base_rotation_deg": [
           0,
           0,
-          0
+          -90
         ],
         "rotation_axis": "z",
         "directions_deg": [

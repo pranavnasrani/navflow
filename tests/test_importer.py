@@ -156,6 +156,9 @@ def test_import_fake_result(root, tmp_path):
             assert sep.any() and (~sep).sum() >= 8  # NaN separators and real points
             assert np.array_equal(sep, np.isnan(k)) and np.array_equal(sep, dom == -1)
             assert set(dom[~sep].tolist()) <= {0, 1, 2}
+            speed = c[f"{key}_speed"]  # |U| along the lines: NaN at the same separators, positive elsewhere
+            assert speed.dtype == np.float32 and len(speed) == len(lines)
+            assert np.array_equal(sep, np.isnan(speed)) and np.all(speed[~sep] > 0)
     # filled directions copy the source arrays and say where from
     np.testing.assert_array_equal(c["d2_pressure"], c["d0_pressure"])
     np.testing.assert_array_equal(c["d3_w0_lines"], c["d4_w0_lines"])
@@ -207,8 +210,8 @@ def test_plane_uses_cruise_condition(root, tmp_path):
     assert m["drag_power_kw"] == pytest.approx(100.0 * SPEED / 1000)  # the simulated value is unchanged
 
 
-def forces_of(fx):
-    return [(i, fx, 5.0, 20.0) for i in range(1, 301)]
+def forces_of(fx, fz=20.0):
+    return [(i, fx, 5.0, fz) for i in range(1, 301)]
 
 
 def test_reference_is_worst_imported_direction(root, tmp_path):
@@ -235,6 +238,29 @@ def test_reference_is_worst_imported_direction(root, tmp_path):
     assert report["filled"][3] == 4 and ms[3]["filled_from"] == 4
     assert ms[3]["direction_deg"] == 30.0 and ms[3]["fuel_saved_l_per_hr"] == 0.0
     assert ms[1]["filled_from"] == 0 and ms[1]["fuel_saved_l_per_hr"] == pytest.approx(ms[0]["fuel_saved_l_per_hr"])
+
+
+def test_aircraft_is_compared_with_its_best_lift_to_drag_angle(root, tmp_path):
+    """With a cruise mass, power is level-flight drag W/(L/D) x v and the reference is the highest-L/D angle."""
+    cfd = make_cfd(cruise={"density_kg_m3": 0.364, "speed_m_s": 250.0, "altitude_km": 11, "mass_kg": 1000.0})
+    model0 = make_model0()
+    write_fake_result(root, cfd, model0, 0, forces=forces_of(100.0, 200.0))   # L/D 2
+    write_fake_result(root, cfd, model0, 4, forces=forces_of(100.0, 1000.0))  # L/D 10: the best
+    write_fake_result(root, cfd, model0, 8, forces=forces_of(100.0, -50.0))   # pushed down: cannot fly level
+    _, out, _, _ = run_import(root, tmp_path, cfd, model0=model0)
+    c = read_cache(out)
+    ms = {d: json.loads(c[f"d{d}_metrics"]) for d in (0, 4, 8)}
+    assert ms[4]["lift_to_drag"] == pytest.approx(10.0) and ms[0]["lift_to_drag"] == pytest.approx(2.0)
+    assert ms[0]["eval_drag_power_kw"] == pytest.approx(1000.0 * 9.81 / 2.0 * 250.0 / 1000.0)  # (W / (L/D)) v
+    assert all(m["reference_is_best"] and m["reference_direction_deg"] == 40.0 for m in ms.values())
+    assert ms[4]["fuel_saved_l_per_hr"] == 0.0
+    extra = (ms[0]["eval_drag_power_kw"] - ms[4]["eval_drag_power_kw"]) * 0.28
+    assert ms[0]["fuel_saved_l_per_hr"] == pytest.approx(extra) and extra > 0
+    assert ms[0]["co2_saved_kg_per_hr"] == pytest.approx(extra * 2.52)
+    assert all(m["speed_gain_pct"] == 0.0 for m in ms.values())
+    # no upward lift: falls back to the Cd A power at cruise, never a division by a negative ratio
+    cda = ms[8]["drag_coefficient_cd"] * ms[8]["frontal_area_m2"]
+    assert ms[8]["eval_drag_power_kw"] == pytest.approx(0.5 * 0.364 * cda * 250.0**3 / 1000.0)
 
 
 def test_filled_direction_is_never_the_reference(root, tmp_path):
@@ -318,6 +344,26 @@ def test_pressure_follows_rotation(root, tmp_path):
     c = read_cache(out)
     p_kinematic = c["d4_pressure"] / RHO
     assert np.abs(p_kinematic - model0.vertices[:, 0]).max() < 0.5
+
+
+def test_pressure_does_not_leak_through_a_thin_plate():
+    """A 0.02-thick plate: +1 on the top faces, -1 underneath. Every vertex keeps its own side's value,
+    and a vertex between faces with different values gets an average, not a jump."""
+    from solver.foam.importer import _pressure_on_model
+
+    plate = trimesh.creation.box(extents=(2.0, 1.0, 0.02))
+    plate = plate.subdivide().subdivide()
+    patch = pv.PolyData.from_regular_faces(np.asarray(plate.vertices), np.asarray(plate.faces))
+    patch = patch.compute_normals(cell_normals=True, point_normals=False, auto_orient_normals=True)
+    nz = patch.cell_data["Normals"][:, 2]
+    patch.cell_data["p"] = np.where(nz > 0.5, 1.0, np.where(nz < -0.5, -1.0, 0.0))
+    patch.flip_faces(inplace=True)  # solver faces point into the solid, like OpenFOAM's boundary
+    display = trimesh.creation.box(extents=(2.0, 1.0, 0.02)).subdivide()
+    p = _pressure_on_model(patch, "p", display, np.eye(3), rho=1.0)
+    top = (display.vertex_normals[:, 2] > 0.9)
+    bottom = (display.vertex_normals[:, 2] < -0.9)
+    assert top.any() and bottom.any()
+    assert np.all(p[top] > 0.5) and np.all(p[bottom] < -0.5)
 
 
 def test_lines_are_back_in_model_frame_and_k_is_sampled(root, tmp_path):

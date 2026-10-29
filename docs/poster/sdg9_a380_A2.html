@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>How a 500-tonne plane stays up</title>
+<link rel="stylesheet" href="sdg.css">
+<style>
+  :root { --sdg: #FD6925; } /* official SDG 9 orange */
+  .hero { left: 0; width: 420mm; top: 118mm; }
+  .idea { position: absolute; left: 32mm; width: 196mm; top: 402mm; }
+  .key { position: absolute; left: 248mm; right: 32mm; top: 408mm; grid-template-columns: 1fr; gap: 10mm; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>How a 500-tonne plane<br>stays up.</h1>
+    <p class="lede">Air speeds up over the top of the wing, so its pressure drops (the blue band) and the wing is pulled upward. We solved this airflow around a full-size Airbus A380 at nine angles, using the Navier–Stokes equations.</p>
+  </header>
+
+  <img class="hero" src="img/plane.png" alt="Airbus A380 coloured by surface pressure, with air paths coloured by speed">
+
+  <section class="idea">
+    <div class="eq">fuel ∝ 1 ÷ (<i>L</i>/<i>D</i>)</div>
+    <h2>More lift for each unit of drag means less fuel.</h2>
+    <p>In steady flight, lift equals the plane’s weight, so <span style="white-space:nowrap">drag = weight ÷ (<i>L</i>/<i>D</i>)</span>. The angle with the highest lift-to-drag ratio burns the least fuel and puts out the least CO₂. Turn the knob on the screen to tilt the wing.</p>
+  </section>
+
+  <section class="key">
+    <div>
+      <h3>Surface pressure</h3>
+      <div class="bar"></div>
+      <div class="ends"><span>Low: suction</span><span>High: air hits head-on</span></div>
+    </div>
+    <div>
+      <h3>Air paths, coloured by speed</h3>
+      <div class="bar"></div>
+      <div class="ends"><span>312 km/h</span><span>422 km/h</span></div>
+    </div>
+  </section>
+
+  <section class="sdg">
+    <div class="tile"><b>SDG</b><span>9</span></div>
+    <div>
+      <h2>Industry, innovation and infrastructure</h2>
+      <p>Build resilient infrastructure, promote inclusive and sustainable industrialisation, and foster innovation.</p>
+    </div>
+  </section>
+
+  <footer>
+    <span>Solved with OpenFOAM, k-ω SST · wind 367 km/h, sea-level air</span>
+    <span>NavFlow · NPS International School STEM Exhibition</span>
+  </footer>
+</body>
+</html>

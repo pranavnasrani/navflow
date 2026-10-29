@@ -6,6 +6,8 @@ Maintains one synchronized (wand_index, knob, view) state across all 4 exhibitio
   * The rotary knob sweeps the wind direction: knob in [0, 1], where the state manager maps
     it to d = d_min + knob * (d_max - d_min)  (IGCSE 0606 linear interpolation).
   * Tab cycles the view mode 0 -> 1 -> 2 -> 0.
+  * Space switches every screen between the simple and the detailed instrument strip.
+  * R puts every camera back to its starting view (after visitors have dragged or zoomed it).
 """
 
 from PySide6.QtCore import QObject, Signal, Qt
@@ -18,16 +20,25 @@ class ExhibitionInputController(QObject):
     # Signals emitted whenever visitor changes inputs
     state_changed = Signal(int, float)  # (wand_index, knob)
     view_changed = Signal(int)          # view mode
+    detail_changed = Signal(bool)       # True = detailed instrument strip, False = simple
+    camera_reset = Signal()             # every window returns to its starting camera
 
     def __init__(self, wand_count: int = 10, knob_step: float = 1 / 32):
         super().__init__()
         self.wand_count = wand_count
         self.knob_step = knob_step
 
-        # Default initial state: a mid-height wand, knob fully anticlockwise (first direction).
+        # Default initial state: a mid-height wand, knob fully anticlockwise (first direction),
+        # and the simple strip, since most visitors walk up cold.
         self.current_wand_index = 4
         self.current_knob = 0.0
         self.current_view = 0
+        self.detailed = False
+
+    def toggle_detail(self):
+        """Simple <-> detailed instrument strip, on all screens at once."""
+        self.detailed = not self.detailed
+        self.detail_changed.emit(self.detailed)
 
     def set_wand(self, index: int):
         """Sets the active smoke-wand index (0..wand_count-1)."""
@@ -97,6 +108,14 @@ class ExhibitionInputController(QObject):
         # 4. View mode
         if key_code == Qt.Key_Tab:
             self.cycle_view()
+            return True
+
+        # 5. Simple / detailed strip, and camera reset
+        if key_code == Qt.Key_Space:
+            self.toggle_detail()
+            return True
+        if key_code == Qt.Key_R:
+            self.camera_reset.emit()
             return True
 
         return False

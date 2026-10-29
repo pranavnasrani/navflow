@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Newton's second law, for air</title>
+<style>
+  @page { size: 420mm 594mm; margin: 0; }
+  :root {
+    --ink: #141414;
+    --ink-2: #555555;
+    --rule: #141414;
+    --time: #8A8A8A;      /* d v / d t: zero once the flow has settled */
+    --convective: #0072B2; /* same three colours as the screens' view 2 */
+    --pressure: #D55E00;
+    --viscous: #B4428E;
+    --paper: #FFFFFF;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 420mm; height: 594mm; background: var(--paper); }
+  body {
+    color: var(--ink);
+    font-family: "Avenir Next", "Avenir", sans-serif;
+    -webkit-print-color-adjust: exact; print-color-adjust: exact;
+    position: relative; overflow: hidden;
+  }
+
+  header { position: absolute; left: 32mm; right: 32mm; top: 34mm; }
+  h1 { font-weight: 600; font-size: 21mm; line-height: 1.02; letter-spacing: -0.02em; }
+  .lede { margin-top: 8mm; font-size: 7.4mm; line-height: 1.35; color: var(--ink-2); max-width: 300mm; font-weight: 400; }
+
+  /* ---------- the equation ---------- */
+  .eq { position: absolute; left: 32mm; right: 32mm; font-family: "STIX Two Text", "STIXGeneral", serif; }
+  .row { display: flex; align-items: flex-start; }
+  .line1 { top: 168mm; }
+  .line2 { top: 352mm; }
+
+  .group { position: relative; display: flex; align-items: flex-start; }
+  /* F = m a brackets above each group */
+  .group > .over {
+    position: absolute; left: 0; right: 0; top: -27mm; height: 22mm;
+    border-top: 0.9mm solid var(--rule); border-left: 0.9mm solid var(--rule); border-right: 0.9mm solid var(--rule);
+    font-family: "Avenir Next", sans-serif;
+  }
+  .over b {
+    position: absolute; top: -17mm; left: 0; font-family: "STIX Two Text", serif; font-style: italic;
+    font-weight: 400; font-size: 15mm; line-height: 1; background: var(--paper); padding-right: 3mm;
+  }
+  .over span { position: absolute; top: -10.5mm; left: 13mm; font-size: 6mm; font-weight: 600; letter-spacing: 0.01em;
+    background: var(--paper); padding: 0 3mm 0 1mm; white-space: nowrap; }
+
+  .t { position: relative; display: flex; flex-direction: column; align-items: center; }
+  .g { height: 78mm; display: flex; align-items: center; font-size: 58mm; line-height: 1; white-space: nowrap; }
+  .op .g { color: var(--ink); padding: 0 3.5mm; }
+  i { font-style: italic; }
+  .frac { display: inline-flex; flex-direction: column; align-items: center; font-size: 37mm; line-height: 1.02; }
+  .frac .bar { width: 100%; height: 0.75mm; background: currentColor; margin: 1.2mm 0; }
+  .sup { font-size: 0.55em; position: relative; top: -0.75em; margin-left: 0.02em; }
+
+  /* labels under each term */
+  .t > .rule { width: 100%; height: 1.6mm; margin-top: 3mm; }
+  .t > .lab { position: absolute; top: 90mm; width: 86mm; font-family: "Avenir Next", sans-serif; text-align: center; left: 50%; transform: translateX(-50%); }
+  .lab h2 { font-size: 7.2mm; font-weight: 600; line-height: 1.15; }
+  .lab p { margin-top: 2.2mm; font-size: 5.4mm; line-height: 1.35; color: var(--ink-2); }
+  .lab.start { left: 0; transform: none; text-align: left; width: 58mm; }
+  .lab.narrow { width: 66mm; }
+
+  .c-rho .g, .c-rho h2 { color: var(--ink); }      .c-rho .rule { background: var(--ink); }
+  .c-time .g, .c-time h2 { color: var(--time); }    .c-time .rule { background: var(--time); }
+  .c-conv .g, .c-conv h2 { color: var(--convective); } .c-conv .rule { background: var(--convective); }
+  .c-pres .g, .c-pres h2 { color: var(--pressure); }   .c-pres .rule { background: var(--pressure); }
+  .c-visc .g, .c-visc h2 { color: var(--viscous); }    .c-visc .rule { background: var(--viscous); }
+
+  /* ---------- foot ---------- */
+  .mass { position: absolute; left: 32mm; right: 32mm; top: 508mm; display: flex; align-items: baseline; gap: 10mm;
+    border-top: 0.4mm solid #D8D8D8; padding-top: 11mm; }
+  .mass .m { font-family: "STIX Two Text", serif; font-size: 17mm; white-space: nowrap; }
+  .mass p { font-size: 6.4mm; line-height: 1.35; color: var(--ink-2); }
+  .mass p strong { color: var(--ink); font-weight: 600; }
+  footer { position: absolute; left: 32mm; right: 32mm; bottom: 22mm; display: flex; justify-content: space-between;
+    font-size: 4.6mm; color: var(--ink-2); letter-spacing: 0.01em; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>Newton’s second law,<br>for air.</h1>
+    <p class="lede">Every tiny parcel of air obeys <i style="font-family:'STIX Two Text',serif">F</i>&#8202;=&#8202;<i style="font-family:'STIX Two Text',serif">ma</i>. Written for a fluid, it becomes the Navier–Stokes equation: the one the four screens are solving.</p>
+  </header>
+
+  <!-- line 1:  m a  -->
+  <div class="eq row line1">
+    <div class="group">
+      <div class="over"><b>m</b><span>mass</span></div>
+      <div class="t c-rho">
+        <div class="g"><i>ρ</i></div>
+        <div class="rule"></div>
+        <div class="lab start"><h2>Density</h2><p>Mass of one cubic metre of air: 1.2&nbsp;kg</p></div>
+      </div>
+    </div>
+    <div class="t op"><div class="g" style="padding-left:12mm">(</div></div>
+    <div class="group">
+      <div class="over"><b>a</b><span>acceleration</span></div>
+      <div class="t c-time">
+        <div class="g"><span class="frac"><span>∂<i>v</i></span><span class="bar"></span><span>∂<i>t</i></span></span></div>
+        <div class="rule"></div>
+        <div class="lab narrow"><h2>Speeding up in time</h2><p>Zero once the flow has settled, as in our runs</p></div>
+      </div>
+      <div class="t op"><div class="g">+</div></div>
+      <div class="t c-conv">
+        <div class="g">(<i>v</i>·∇)<i>v</i></div>
+        <div class="rule"></div>
+        <div class="lab"><h2>Speeding up in space</h2><p>The air changes speed as it moves to a new place around the shape</p></div>
+      </div>
+    </div>
+    <div class="t op"><div class="g" style="padding-right:0">)</div></div>
+  </div>
+
+  <!-- line 2:  = F -->
+  <div class="eq row line2">
+    <div class="t op"><div class="g" style="padding-left:0;padding-right:8mm">=</div></div>
+    <div class="group">
+      <div class="over"><b>F</b><span>forces</span></div>
+      <div class="t c-pres">
+        <div class="g">−∇<i>p</i></div>
+        <div class="rule"></div>
+        <div class="lab"><h2>Pressure push</h2><p>Air is shoved from high pressure towards low pressure</p></div>
+      </div>
+      <div class="t op"><div class="g">+</div></div>
+      <div class="t c-visc">
+        <div class="g"><i>μ</i>∇<span class="sup">2</span><i>v</i></div>
+        <div class="rule"></div>
+        <div class="lab"><h2>Friction</h2><p>Each layer of air drags on its neighbours, and on the surface</p></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="mass">
+    <div class="m">∇&#8202;·&#8202;<i>v</i>&#8202;=&#8202;0</div>
+    <p><strong>And no air goes missing.</strong> As much flows into any small box as flows out of it.</p>
+  </div>
+
+  <footer>
+    <span>Navier–Stokes, incompressible · solved with OpenFOAM, k-ω SST</span>
+    <span>NavFlow · Math section</span>
+  </footer>
+</body>
+</html>

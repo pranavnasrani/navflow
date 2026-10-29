@@ -94,7 +94,7 @@ class ObjectStateManager:
         self._metrics = []
         self._ns_terms = []
         self._pressure = []
-        self._wands = []  # _wands[d][w] = (lines, k, dominant)
+        self._wands = []  # _wands[d][w] = (lines, k, dominant, speed); speed is None in older caches
         for d in range(n_dir):
             s = state_key(d)
             self._metrics.append(json.loads(data[f"{s}_metrics"]))
@@ -105,6 +105,7 @@ class ObjectStateManager:
                     data[f"{wand_key(d, w)}_lines"],
                     data[f"{wand_key(d, w)}_k"],
                     data[f"{wand_key(d, w)}_dominant"],
+                    data.get(f"{wand_key(d, w)}_speed"),
                 )
                 for w in range(n_wand)
             ])
@@ -129,6 +130,14 @@ class ObjectStateManager:
         i2 = i1 + 1
         t = (direction - dirs[i1]) / (dirs[i2] - dirs[i1])
         return i1, i2, float(min(max(t, 0.0), 1.0))
+
+    def wand_lines(self, direction_index: int) -> list[np.ndarray]:
+        """The streamlines of all 10 wand heights for one solved direction (already in RAM, no copy)."""
+        return [entry[0] for entry in self._wands[int(direction_index)]]
+
+    def wand_sets(self, direction_index: int) -> list[tuple]:
+        """(lines, k, dominant, speed) of all 10 wand heights for one solved direction (no copy)."""
+        return list(self._wands[int(direction_index)])
 
     def get_state(self, wand_index: int, knob: float) -> dict:
         """
@@ -157,8 +166,9 @@ class ObjectStateManager:
         norm = float(np.linalg.norm(vec))
         wind_vector = vec / norm if norm > 0.0 else self._wind_vectors[near].copy()
 
-        lines, k, dominant = self._wands[near][w]
+        lines, k, dominant, speed = self._wands[near][w]
         return {
+            "direction_index": near,  # the solved direction the lines come from
             "wand_index": w,
             "wand_z": float(self.wand_heights[w]),
             "direction_deg": d,
@@ -171,6 +181,7 @@ class ObjectStateManager:
             "lines": lines,
             "k": k,
             "dominant": dominant,
+            "speed": speed,  # |U| along the lines in m/s, or None for a cache imported before speed was stored
             "filled": self._metrics[near].get("filled_from") is not None,
             "mesh_vertices": self.mesh_vertices,
             "mesh_faces": self.mesh_faces,

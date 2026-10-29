@@ -38,7 +38,8 @@ This repository contains an interactive, native 4-monitor 3D Computational Fluid
 
 ### Python Environment
 - Python **3.12+**, virtual environment `.venv/`, dependencies in `requirements.txt` (`PySide6`, `pyvista`, `pyvistaqt`, `vtk`, `trimesh`, `rtree`, `numpy`, `scipy`, `matplotlib`).
-- OpenFOAM runs need **Docker Desktop** (image `opencfd/openfoam-default:2512`, volume `navflow-cases`, 4 MPI processes). The app itself does not need Docker.
+- OpenFOAM runs need **Docker** (image `opencfd/openfoam-default:2512`, volume `navflow-cases`, 4 MPI processes): Docker Desktop on the laptop, **Colima** on the Mac mini (8 CPU / 12 GB; after a reboot run `colima start` there). The app itself does not need Docker.
+- Model conversion needs **Blender** (`brew install --cask blender`) for .blend/.fbx/.glb files.
 
 ### Common Commands
 
@@ -52,7 +53,9 @@ This repository contains an interactive, native 4-monitor 3D Computational Fluid
 ./.venv/bin/python app/main.py --object airplane   # airplane | f1_car | building | human
 ./.venv/bin/python app/main.py --no-remote         # skip the iPad remote
 
-# 1. Prepare a downloaded model (STL/OBJ/PLY/GLB/GLTF) -> assets/models/<id>/model.stl + preview.png
+# 1. Prepare a downloaded model (STL/OBJ/PLY, or GLB/GLTF/BLEND/FBX via headless Blender) -> assets/models/<id>/model.stl + preview.png
+#    --wrap RES shrink-wraps display models made of open parts (cube = longest side / RES); --drop skips Blender objects by name prefix.
+#    Current models: airplane --wrap 500 --drop gears, f1_car --wrap 500, building --wrap 400 (sources in assets/models/incoming/, git-ignored).
 #    Check preview.png: nose faces the wind (+x), up is up.
 ./.venv/bin/python solver/prepare_model.py --object airplane --src ~/Downloads/plane.glb
 
@@ -75,7 +78,7 @@ This repository contains an interactive, native 4-monitor 3D Computational Fluid
 ### Two machines (laptop + Mac mini)
 Each machine keeps its own queue file `runs/full/queue_<machine>.json`, chosen with `--machine` (default `laptop`). **On the mini always pass `--machine mini`** (for `run`, `stop` and `status`), e.g. `run_openfoam.py run --objects building human --machine mini`; `pull_from_mini.sh` also refuses to copy `queue_laptop.json`, so the laptop's queue is never overwritten.
 ```bash
-./scripts/sync_to_mini.sh     # rsync the project to $MINI_HOST (default mac-mini.local), excluding .venv, runs, .git
+./scripts/sync_to_mini.sh     # rsync the project to $MINI_HOST (default the mini's Tailscale IP 100.114.120.115), excluding .venv, runs, .git
 ./scripts/pull_from_mini.sh   # rsync the mini's runs/full/ back into runs/full/, then run import_results.py
 ```
 
@@ -103,7 +106,8 @@ navflow/
 │   ├── sync_to_mini.sh             # rsync project -> Mac mini
 │   └── pull_from_mini.sh           # rsync runs/full from the Mac mini
 ├── solver/
-│   ├── prepare_model.py            # Model -> closed, scaled, oriented STL + preview
+│   ├── prepare_model.py            # Model -> closed, scaled, oriented STL + preview (--wrap, Blender import)
+│   ├── blender_export.py           # Run inside headless Blender: .blend/.fbx/.glb -> one joined STL
 │   ├── run_openfoam.py             # CLI: run / stop / status / test
 │   ├── import_results.py           # CLI: finished runs -> assets/cache/*.npz
 │   ├── navier_stokes_3d.py         # Small from-scratch Chorin solver, kept for teaching and its test
@@ -130,6 +134,7 @@ navflow/
 
 2. **Models and directions**:
    - Models are prepared with `solver/prepare_model.py` (base rotation, scale and placement are applied once, when it writes `model.stl`; everything that reloads that file uses `geometry.load_prepared`, which does not rotate again). The model is then **rotated and re-meshed for every direction**; the tunnel stays axis-aligned with wind along +x. Per-object speed, real size, direction list, floor type and widgets are in `config/exhibition_config.json`.
+   - Fuel/CO2: each object is compared with its own worst solved direction ("saved"), except the airplane, which has a cruise `mass_kg`: level flight means drag = W / (L/D), and it is compared with its best-L/D angle ("extra"). The airplane also meshes two levels finer (`surface_refinement` [6, 7], ~1.9 M cells).
    - Air is sea-level for all runs (rho = 1.225 kg/m^3, nu = 1.5e-5 m^2/s). Convergence: stop when drag and lift each change by <0.2% over the last 50 iterations (min 200, cap 1000); a run that hits the cap exports 100-iteration fieldAverage fields and is marked `flagged`.
 
 3. **Cache format v2** (`app/cache_format.py`, `assets/cache/<obj>_states.npz`):
@@ -140,7 +145,9 @@ navflow/
    - `1`-`9`, `0`: smoke wand to height 1 to 10.
    - `Up` / `Down` or `W` / `S`: step the wand up/down.
    - Wind-direction knob, clockwise (next direction): `Right`, `D`, `+`, `=`, `]`. Anticlockwise: `Left`, `A`, `-`, `_`, `[`. The mouse wheel also turns it (one notch = one detent of `knob_step`).
-   - `Tab`: cycle view. There is no key for camera reset or quit.
+   - `Tab`: cycle view. `Space`: simple / detailed instrument strip (starts simple). `R`: reset every camera.
+   - Camera: drag to turn; trackpad pinch or Cmd + scroll to zoom (plain scroll stays the knob). There is no key to quit.
+   - Smoke shows at all 10 wand heights: the selected height bright, the other nine faint (`ObjectStateManager.wand_lines`).
 
 5. **Linear interpolation (0606)**:
    - The knob maps to a direction by a straight line, d = d_min + knob (d_max - d_min). Between solved directions d1 < d < d2, `app/state_manager.py` computes t = (d - d1)/(d2 - d1) and y = (1 - t) y1 + t y2, blending surface pressure, N-S terms and telemetry live.

@@ -22,7 +22,7 @@ def box_model(obj_id: str, tmp_path: Path):
     cfd = OBJECTS[obj_id]
     src = tmp_path / "box.stl"
     trimesh.creation.box(extents=(4.0, 1.0, 1.0)).export(src)
-    model0 = prepare_model(src, replace(cfd, real_size_m=4.0, size_axis="x"))
+    model0 = prepare_model(src, replace(cfd, real_size_m=4.0, size_axis="x", base_rotation_deg=(0.0, 0.0, 0.0)))
     return cfd, run_geometry(model0, cfd, cfd.directions_deg[0])
 
 

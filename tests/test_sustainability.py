@@ -1,7 +1,9 @@
 """Tests for solver.foam.sustainability: drag power, fuel and CO2 saved, wind-load table."""
 import pytest
 
-from solver.foam.sustainability import drag_power_kw, fuel_and_co2, fuel_burn_l_per_hr, speed_gain_pct, wind_load_table
+from solver.foam.sustainability import (
+    G, drag_power_kw, fuel_and_co2, fuel_burn_l_per_hr, level_flight_drag_n, speed_gain_pct, wind_load_table,
+)
 
 
 def test_drag_power_cubic_in_speed():
@@ -45,3 +47,10 @@ def test_speed_gain_is_zero_for_non_positive_cd():
     assert speed_gain_pct(0.0, 1.0) == 0.0
     assert speed_gain_pct(-0.2, 1.0) == 0.0
     assert speed_gain_pct(0.5, 0.0) == 0.0
+
+
+def test_level_flight_drag_is_weight_over_lift_to_drag():
+    # 500 t at L/D 20: D = m g / (L/D) = 500000 x 9.81 / 20 = 245 250 N
+    assert level_flight_drag_n(500_000, 20.0) == pytest.approx(500_000 * G / 20.0)
+    assert level_flight_drag_n(500_000, 10.0) == pytest.approx(2 * level_flight_drag_n(500_000, 20.0))  # half the ratio, twice the drag
+    assert level_flight_drag_n(500_000, 0.0) is None and level_flight_drag_n(500_000, -1.0) is None

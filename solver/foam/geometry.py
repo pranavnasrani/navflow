@@ -86,10 +86,73 @@ def _make_watertight(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
     return merged
 
 
-def prepare_model(src: Path, cfd: ObjectCfd) -> trimesh.Trimesh:
+def _is_closed_as_stl(mesh: trimesh.Trimesh) -> bool:
+    """Closed after merging coincident points, as it will be once written to STL and read back."""
+    t = trimesh.Trimesh(mesh.vertices, mesh.faces, process=True)
+    return t.is_watertight and t.body_count == 1
+
+
+def wrap_surface(mesh: trimesh.Trimesh, resolution: float = 500.0, max_triangles: int = 300_000) -> trimesh.Trimesh:
+    """Shrink-wrap any surface (open parts, overlaps, decals) into one closed skin.
+
+    Display models are hundreds of open pieces, so OpenFOAM cannot tell inside from outside.
+    Steps: fill the model into cubes of side pitch = longest side / resolution (a ratio), fill
+    the inside (after sealing cracks about two cubes wide), keep the biggest connected lump (loose specks go), blur by one cube and draw the
+    skin where the blurred value is 0.3 (a contour, like a height-0.3 contour line on a map).
+    0.3 rather than 0.5 keeps parts one cube thin, such as wing endplates, joined on.
+    The skin is then simplified with manifold, which never opens a hole, to `max_triangles`.
+    The skin ends up about one cube outside the original surface (1 cm on the car at resolution 500).
+    """
+    import manifold3d
+    import pyvista as pv
+    from scipy import ndimage
+
+    pitch = float(mesh.extents.max()) / resolution
+    pad = 3
+    shell = mesh.voxelized(pitch)                     # cubes the surface passes through
+    # Closing (grow one cube, then shrink one) seals cracks up to about two cubes wide between parts.
+    sealed = ndimage.binary_closing(np.pad(shell.matrix, pad), iterations=1)
+    solid = ndimage.binary_fill_holes(sealed)
+    labels, n = ndimage.label(solid)
+    if n == 0:
+        raise ModelNotWatertight("wrap found no solid")
+    sizes = ndimage.sum(solid, labels, range(1, n + 1))
+    solid = labels == (1 + int(np.argmax(sizes)))
+    field = ndimage.gaussian_filter(solid.astype(np.float32), sigma=1.0)
+
+    img = pv.ImageData(dimensions=solid.shape, spacing=(pitch,) * 3)
+    img.point_data["s"] = field.ravel(order="F")
+    surf = img.contour([0.3], scalars="s").triangulate().clean()
+    skin = trimesh.Trimesh(surf.points, surf.faces.reshape(-1, 4)[:, 1:], process=True)
+    skin = max(_split_bodies(skin), key=lambda b: len(b.faces))
+    # Grid index 0 sits `pad` cubes before the voxel grid's own origin.
+    skin.apply_translation(shell.transform[:3, 3] - pad * pitch)
+    if not _is_closed_as_stl(skin):
+        raise ModelNotWatertight(f"wrapped skin is not closed ({_open_edge_count(skin)} open edges)")
+
+    if len(skin.faces) > max_triangles:
+        man = manifold3d.Manifold(manifold3d.Mesh(
+            vert_properties=skin.vertices.astype(np.float32), tri_verts=skin.faces.astype(np.uint32)))
+        # Bigger tolerance = fewer triangles. Try from fine to coarse: keep the smallest result
+        # that is still closed once its points are merged (STL has no indices), and stop at the
+        # first one inside the budget. A tolerance that pinches two points together is skipped.
+        best = skin
+        for frac in (0.05, 0.1, 0.15, 0.2, 0.3, 0.4):
+            out = man.simplify(frac * pitch).to_mesh()
+            small = trimesh.Trimesh(out.vert_properties[:, :3], out.tri_verts, process=True)
+            if len(small.faces) < len(best.faces) and _is_closed_as_stl(small):
+                best = small
+                if len(best.faces) <= max_triangles:
+                    break
+        skin = best
+    return skin
+
+
+def prepare_model(src: Path, cfd: ObjectCfd, wrap_resolution: float | None = None) -> trimesh.Trimesh:
     """Load `src` and return one closed, real-size mesh placed in tunnel coordinates.
 
-    Steps: load, base rotation (x then y then z), union into one watertight body,
+    Steps: load, base rotation (x then y then z), shrink-wrap if `wrap_resolution` is given
+    (see `wrap_surface`, for display models made of open parts), union into one watertight body,
     scale so the extent along `cfd.size_axis` equals `cfd.real_size_m`, then centre the
     bbox at x = y = 0 with z bottom = 0 (floor) or z centred at 0 (free air).
     """
@@ -102,6 +165,8 @@ def prepare_model(src: Path, cfd: ObjectCfd) -> trimesh.Trimesh:
     mesh = mesh.copy()
     mesh.apply_transform(transform)
 
+    if wrap_resolution:
+        mesh = wrap_surface(mesh, wrap_resolution)
     mesh = _make_watertight(mesh)
     if mesh.volume < 0:  # inside-out normals: flip so the volume is positive
         mesh.invert()

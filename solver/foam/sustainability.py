@@ -8,6 +8,10 @@ Maths link (IGCSE 0606):
     That is a cube root, i.e. the power 1/3 - an index (surd) calculation.
   * The comparison shape is the object's own WORST simulated wind direction (its largest drag power),
     so "saved" is a difference of two powers, (P_worst - P) x fuel per kWh, and is zero at the worst angle.
+  * An aeroplane is different: in level flight lift must equal weight, L = W = m g. Dividing,
+    D = L / (L/D) = W / (L/D), so the drag it must beat is the weight divided by its lift-to-drag ratio.
+    A better ratio means less drag, so its comparison is its BEST angle (highest L/D), and the number
+    shown is the EXTRA fuel, (P - P_best) x fuel per kWh, which is zero at the best angle.
   * Wind load scales with v^2, so a wind of speed v loads a structure (v / v_sim)^2 times as
     much as the simulated wind: a direct-proportion rule with a squared ratio.
 """
@@ -25,6 +29,20 @@ WIND_LOAD_WINDS = (
 def drag_power_kw(cd: float, area: float, rho: float, v: float) -> float:
     """P = 1/2 rho Cd A v^3 in kilowatts (inputs in kg/m^3, m^2, m/s)."""
     return 0.5 * rho * cd * area * v**3 / 1000.0
+
+
+G = 9.81  # m/s^2, gravitational field strength: weight W = m g
+
+
+def level_flight_drag_n(mass_kg: float, lift_to_drag: float) -> float | None:
+    """Drag (N) an aircraft of `mass_kg` must overcome in level flight: D = W / (L/D) with W = m g.
+
+    Returns None when L/D is zero or negative: that angle makes no upward lift, so it cannot hold
+    the aircraft up at all and there is no level-flight drag to quote.
+    """
+    if lift_to_drag <= 0.0:
+        return None
+    return mass_kg * G / lift_to_drag
 
 
 def fuel_and_co2(

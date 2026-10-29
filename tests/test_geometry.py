@@ -14,6 +14,7 @@ from solver.foam.geometry import (
     tunnel_bounds,
     view_bounds,
     wand_heights,
+    wrap_surface,
 )
 from solver.foam.settings import ObjectCfd
 
@@ -171,3 +172,30 @@ def test_load_prepared_does_not_rotate_a_second_time(tmp_path):
     assert np.allclose(np.sort(again.vertices, axis=0), np.sort(prepared.vertices, axis=0), atol=1e-4)
     # prepare_model on the saved file WOULD rotate again (this is the bug being guarded against)
     assert not np.allclose(prepare_model(out, cfd).bounds, prepared.bounds, atol=1e-3)
+
+
+def small_hole_box():
+    """A 2 x 1 x 1 box with one small triangle missing: a crack, like the gaps between model parts."""
+    box = stl_box(2, 1, 1).subdivide().subdivide().subdivide().subdivide()
+    return trimesh.Trimesh(box.vertices, box.faces[1:], process=False)
+
+
+def test_wrap_surface_closes_an_open_box_and_keeps_its_size():
+    open_box = small_hole_box()
+    assert not open_box.is_watertight
+    wrapped = wrap_surface(open_box, resolution=60)
+    assert wrapped.is_watertight and wrapped.body_count == 1
+    pitch = 2 / 60
+    assert np.allclose(wrapped.extents, (2, 1, 1), atol=3 * pitch)
+    assert wrapped.volume == pytest.approx(2.0, rel=0.2)   # skin sits about one cube outside
+
+
+def test_wrap_surface_drops_loose_specks():
+    speck = stl_box(0.05, 0.05, 0.05, centre=(5, 0, 0))
+    wrapped = wrap_surface(trimesh.util.concatenate([stl_box(2, 1, 1), speck]), resolution=80)
+    assert wrapped.body_count == 1 and wrapped.bounds[1][0] < 1.5
+
+
+def test_prepare_model_wraps_an_open_model_when_asked(tmp_path):
+    m = prepare_model(save(small_hole_box(), tmp_path), make_cfd(), wrap_resolution=60)
+    assert m.is_watertight and m.extents[0] == pytest.approx(10.0)

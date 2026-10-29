@@ -17,6 +17,8 @@ Keys (all stored with np.savez_compressed, no pickles):
     d<i>_w<j>_lines (M,3) f32                            streamlines in the model frame, joined with NaN rows
     d<i>_w<j>_k (M,) f32                                 turbulent kinetic energy along the lines (NaN at separators)
     d<i>_w<j>_dominant (M,) int8                         0 convective, 1 pressure, 2 viscous, -1 at separators
+    d<i>_w<j>_speed (M,) f32                             air speed |U| in m/s along the lines (NaN at separators);
+                                                         optional, caches imported before it was added have none
 
 Maths link (IGCSE 0606): the display blends neighbouring directions by linear interpolation,
 y = (1 - t) y1 + t y2 with t = (a - a1)/(a2 - a1), so every blended quantity is stored as a plain

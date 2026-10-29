@@ -108,13 +108,13 @@ def test_overlay_text(qapp):
     fuel.set_metrics({"fuel_burn_l_per_hr": 900.0, "fuel_saved_l_per_hr": 123.4, "co2_saved_kg_per_hr": 311.0,
                       "speed_gain_pct": 8.2})
     text = fuel.all_text()
-    assert "L/h" in text and "SDG 13" in text and "kg/h" in text and "+8.2 %" in text
+    assert "L/h" in text and "SDG 9" in text and "SDG 13" not in text and "kg/h" in text and "+8.2 %" in text
     assert "Fuel burned: 900.0 L/h" in text and "Top-speed gain vs worst angle: +8.2 %" in text
 
     tower = SustainabilityOverlay(("wind_load",), None)
     tower.set_metrics({"wind_load": _wind_load(), "direction_deg": 15.0}, 37.5)
     text = tower.all_text()
-    assert "Category 5" in text and "SDG 9" in text and "Worst wind direction: 37.5°" in text
+    assert "Category 5" in text and "SDG 11" in text and "Worst wind direction: 37.5°" in text
 
 
 def _fuel_metrics(direction):
@@ -143,6 +143,20 @@ def test_overlay_worst_angle_text(qapp):
     m["eval_altitude_km"] = 0.0
     fuel.set_metrics(m)
     assert "at cruise (250 m/s)" in fuel.all_text()
+
+
+def test_overlay_best_angle_text_for_aircraft(qapp):
+    plane = SustainabilityOverlay(("fuel",), None)
+    m = dict(_fuel_metrics(4.0), reference_is_best=True, lift_to_drag=17.24)
+    plane.set_metrics(m)
+    text = plane.all_text()
+    assert "best angle tested" in text and "worst" not in text and "L/h" not in text
+    assert "Lift ÷ drag = 17.2" in text and "drag = weight ÷ (L/D)" in text
+    plane.set_metrics(dict(m, direction_deg=8.0))
+    text = plane.all_text()
+    # extra / (burn - extra) = 123.4 / 776.6 = 15.9 %; L/D at the best angle = 17.24 x 900 / 776.6 = 20.0
+    assert "Fuel vs best angle (4°): +16 %" in text and "20.0 at the best angle" in text
+    assert "L/h" not in text and "kg/h" not in text and "Saved" not in text
 
 
 def test_overlay_cruise_note_only_when_evaluated_off_the_simulated_speed(qapp):
@@ -259,3 +273,4 @@ def test_overlay_fuel_note_is_wrapped(qapp):
     assert fuel.fuel_note.wordWrap()
     fuel.fit(340)
     assert fuel.height() >= fuel.sizeHint().height() - 1
+

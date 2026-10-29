@@ -25,7 +25,8 @@ _POINTS_PER_LINE = 6
 
 
 def write_fake_cache(path: Path, obj_config: dict, n_dir: int = 9, n_wand: int = 10,
-                     n_vertices: int | None = None, points_per_line: int = _POINTS_PER_LINE) -> None:
+                     n_vertices: int | None = None, points_per_line: int = _POINTS_PER_LINE,
+                     with_speed: bool = False) -> None:
     """`n_vertices` swaps the 8-vertex box for a mesh of that many vertices (to test real-size lookups);
     `points_per_line` sets the streamline length (the wand then has 5 * (points_per_line + 1) rows)."""
     box = trimesh.creation.box(extents=(4.0, 2.0, 2.0))
@@ -87,4 +88,6 @@ def write_fake_cache(path: Path, obj_config: dict, n_dir: int = 9, n_wand: int =
             payload[f"{key}_lines"] = np.vstack(pts).astype(np.float32)
             payload[f"{key}_k"] = np.concatenate(k).astype(np.float32)
             payload[f"{key}_dominant"] = np.concatenate(dom).astype(np.int8)
+            if with_speed:  # speed = 100 * d at every real point, NaN at the separators like k
+                payload[f"{key}_speed"] = np.where(np.isnan(payload[f"{key}_k"]), np.nan, 100.0 * d).astype(np.float32)
     write_cache(path, payload)

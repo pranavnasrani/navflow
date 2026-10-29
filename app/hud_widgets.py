@@ -5,7 +5,8 @@ HUD building blocks for the monitor windows (native Qt widgets, no web content).
   * `particles_on_lines`        flow tracer positions that slide along those lines.
   * `log_bar_value`             0..100 bar length for a number that spans many powers of ten.
   * `NsTermsPanel`              the equation  rho (v.grad)v = -grad p + mu laplacian(v)  with one bar per term.
-  * `SustainabilityOverlay`     fuel / CO2, top-speed and wind-load cards with their UN SDG tag.
+  * `SustainabilityOverlay`     the fuel / CO2, top-speed and wind-load lines with their UN SDG tag.
+  * `rainbow_cmap`              the banded blue-to-red colour scale of the results window.
 
 Maths link (IGCSE 0606): logarithms (the bars), linear interpolation (the tracers), the cube root and
 the squared-speed rule (the sustainability numbers, derived in solver/foam/sustainability.py).
@@ -16,16 +17,16 @@ import math
 
 import numpy as np
 import pyvista as pv
-from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPen
-from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QProgressBar, QVBoxLayout, QWidget
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QFrame, QGridLayout, QLabel, QProgressBar, QVBoxLayout, QWidget
 
 # --------------------------------------------------------------------------------------------------
 # Colours. Three fixed colours name the three Navier-Stokes terms everywhere (bars, streamlines in
-# view 2, the legend). Chosen to stay apart for colour-blind viewers and to read on a dark screen.
+# view 2, the legend, the A2 poster). Chosen to stay apart for colour-blind viewers (Okabe-Ito family)
+# and to read on the light, Fluent-style results window.
 # --------------------------------------------------------------------------------------------------
 TERM_NAMES = ("convective", "pressure", "viscous")
-TERM_COLORS = {"convective": "#56B4E9", "pressure": "#F0E442", "viscous": "#FF6FB5"}
+TERM_COLORS = {"convective": "#0072B2", "pressure": "#D55E00", "viscous": "#B4428E"}
 TERM_LABELS = {
     "convective": "(v·∇)v — convective (inertia)",
     "pressure": "−∇p — pressure gradient",
@@ -39,9 +40,23 @@ TERM_LABELS_2LINE = {
 }
 EQUATION = "ρ(v·∇)v = −∇p + μ∇²v"
 
-PANEL_BG = "rgba(8, 13, 24, 225)"
-TEXT = "#F1F5F9"
-MUTED = "#AAB6C8"
+# Results-window theme (light report panel beside a gradient graphics window, like CFD post-processors)
+PANEL_BG = "#ECEEF1"
+TEXT = "#1D232B"
+MUTED = "#5B6573"
+RULE = "#C7CDD5"
+
+# Banded rainbow used by CFD post-processors: blue (low) - cyan - green - yellow - red (high).
+RAINBOW_STOPS = ("#0000FF", "#00FFFF", "#00FF00", "#FFFF00", "#FF0000")
+N_BANDS = 20
+
+
+def rainbow_cmap(n_bands: int = N_BANDS):
+    """The banded rainbow as a matplotlib colormap with `n_bands` flat colours (0 = continuous)."""
+    from matplotlib.colors import LinearSegmentedColormap
+
+    cmap = LinearSegmentedColormap.from_list("cfd_rainbow", RAINBOW_STOPS)
+    return cmap.resampled(n_bands) if n_bands else cmap
 
 
 def hex_to_rgb(color: str) -> tuple[int, int, int]:
@@ -207,37 +222,35 @@ def _num(metrics: dict, key: str, default: float = 0.0) -> float:
 # --------------------------------------------------------------------------------------------------
 # Navier-Stokes term bars
 # --------------------------------------------------------------------------------------------------
+def _role(widget: QWidget, role: str) -> QWidget:
+    """Tag a widget for the window's style sheet (QLabel[role="value"] ...), so one sheet sets every size."""
+    widget.setProperty("role", role)
+    return widget
+
+
+def _repolish(widget: QWidget) -> None:
+    """Re-apply the style sheet after a dynamic property changed (Qt does not do it by itself)."""
+    widget.style().unpolish(widget)
+    widget.style().polish(widget)
+
+
 class NsTermsPanel(QFrame):
-    """The momentum equation with a log-scale bar per term; the largest term is outlined and marked."""
+    """The momentum equation with a log-scale bar per term; the largest term is set in bold and marked."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("nsPanel")
-        self.setStyleSheet(
-            f"QFrame#nsPanel {{ background-color: #111A2B; border: 1px solid #2A3A57; border-radius: 8px; }}"
-            f"QLabel {{ border: none; background: transparent; color: {TEXT}; }}"
-        )
         self.dominant: str | None = None
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(6)
 
-        hdr = QLabel("NAVIER–STOKES: WHICH TERM WINS?")
-        hdr.setStyleSheet("font-size: 12px; font-weight: 800; letter-spacing: 1px; color: #7FB7FF;")
-        lay.addWidget(hdr)
-
-        self.equation_label = QLabel(EQUATION)
-        self.equation_label.setAlignment(Qt.AlignCenter)
-        self.equation_label.setStyleSheet(
-            f"font-size: 20px; font-weight: 800; color: {TEXT}; background-color: #0A1220;"
-            "border-radius: 6px; padding: 6px;"
-        )
+        self.equation_label = _role(QLabel(EQUATION), "equation")
         lay.addWidget(self.equation_label)
 
-        self.caption = QLabel("size of each term near the model, per unit mass (m/s², log scale)")
+        self.caption = _role(QLabel("size of each term near the model, per unit mass (m/s², log scale)"), "small")
         self.caption.setWordWrap(True)
-        self.caption.setStyleSheet(f"font-size: 11px; color: {MUTED};")
         lay.addWidget(self.caption)
 
         self.rows: dict[str, QFrame] = {}
@@ -248,45 +261,36 @@ class NsTermsPanel(QFrame):
             row = QFrame()
             row.setObjectName(f"row_{name}")
             rl = QVBoxLayout(row)
-            rl.setContentsMargins(8, 4, 8, 4)
+            rl.setContentsMargins(0, 2, 0, 2)
             rl.setSpacing(3)
 
-            title = QLabel(TERM_LABELS_2LINE[name])
-            title.setStyleSheet(f"font-size: 13px; font-weight: 700; color: {TERM_COLORS[name]};")
+            title = _role(QLabel(TERM_LABELS_2LINE[name]), "term")
+            title.setStyleSheet(f"color: {TERM_COLORS[name]};")
             rl.addWidget(title)
 
             bar = QProgressBar()
+            bar.setObjectName(f"bar_{name}")
             bar.setRange(0, 100)
             bar.setTextVisible(False)
-            bar.setFixedHeight(12)
+            bar.setFixedHeight(8)
             bar.setStyleSheet(
-                "QProgressBar { background-color: #05080F; border: none; border-radius: 6px; }"
-                f"QProgressBar::chunk {{ background-color: {TERM_COLORS[name]}; border-radius: 6px; }}"
+                f"QProgressBar {{ background-color: #D6DBE1; border: none; border-radius: 0px; }}"
+                f"QProgressBar::chunk {{ background-color: {TERM_COLORS[name]}; border-radius: 0px; }}"
             )
-            val = QLabel("—")
-            val.setStyleSheet(f"font-size: 13px; font-weight: 700; color: {TEXT};")
-            val.setMinimumWidth(110)
+            val = _role(QLabel("—"), "termValue")
+            val.setMinimumWidth(130)
             val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
             line = QGridLayout()
             line.setContentsMargins(0, 0, 0, 0)
+            line.setHorizontalSpacing(10)
             line.addWidget(bar, 0, 0)
             line.addWidget(val, 0, 1)
             line.setColumnStretch(0, 1)
             rl.addLayout(line)
 
-            row.setMinimumHeight(row.sizeHint().height())  # never let a squeezed window clip a bar's title
             lay.addWidget(row)
             self.rows[name], self.bars[name], self.value_labels[name], self.name_labels[name] = row, bar, val, title
-            self._style_row(name, False)
-
-    def _style_row(self, name: str, dominant: bool) -> None:
-        colour = TERM_COLORS[name]
-        if dominant:
-            style = f"QFrame#row_{name} {{ border: 2px solid {colour}; border-radius: 6px; background-color: #1B2740; }}"
-        else:
-            style = f"QFrame#row_{name} {{ border: 2px solid transparent; border-radius: 6px; background-color: transparent; }}"
-        self.rows[name].setStyleSheet(style)
 
     def set_terms(self, terms: dict[str, float]) -> None:
         """Update the three bars from {'convective', 'pressure', 'viscous'} (m/s²)."""
@@ -296,61 +300,49 @@ class NsTermsPanel(QFrame):
             v = values[name]
             self.bars[name].setValue(log_bar_value(v))
             is_dom = name == self.dominant
-            text = f"{v:.3g} m/s²" if v > 0 else "—"
+            text = (f"{v:,.0f} m/s²" if v >= 100 else f"{v:.3g} m/s²") if v > 0 else "—"
             self.value_labels[name].setText(text + ("  ◀ largest" if is_dom else ""))
-            self._style_row(name, is_dom)
+            self.value_labels[name].setProperty("dominant", is_dom)
+            _repolish(self.value_labels[name])
 
 
 # --------------------------------------------------------------------------------------------------
-# Sustainability cards
+# Sustainability section
 # --------------------------------------------------------------------------------------------------
 class SustainabilityOverlay(QFrame):
-    """Cards laid over the 3D view. `widgets` picks which: 'fuel', 'speed', 'wind_load'."""
+    """The sustainability section of the report panel. `widgets` picks its parts: 'fuel', 'speed', 'wind_load'."""
 
     def __init__(self, widgets: tuple[str, ...], parent=None):
         super().__init__(parent)
         self.widgets = tuple(widgets)
-        self.setObjectName("sustainOverlay")
-        self.setAttribute(Qt.WA_StyledBackground, True)
-        self.setStyleSheet(
-            f"QFrame#sustainOverlay {{ background-color: {PANEL_BG}; border: 1px solid #1F6F54; border-radius: 10px; }}"
-            f"QLabel {{ border: none; background: transparent; color: {TEXT}; }}"
-        )
-        self.setFixedWidth(400)
+        self.setObjectName("sustain")
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(14, 10, 14, 10)
-        lay.setSpacing(5)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
 
         self._labels: list[QLabel] = []
 
-        hdr = QLabel("SUSTAINABILITY IMPACT")
-        hdr.setStyleSheet("font-size: 12px; font-weight: 800; letter-spacing: 1px; color: #5CF2B0;")
-        lay.addWidget(hdr)
-        self._labels.append(hdr)
-
         if "fuel" in self.widgets:
-            self.fuel_big = self._label(lay, "", "font-size: 22px; font-weight: 800; color: #5CF2B0;")
-            self.saved_big = self._label(lay, "", "font-size: 18px; font-weight: 800; color: #5CF2B0;", wrap=True)
-            self.co2_big = self._label(lay, "", "font-size: 18px; font-weight: 800; color: #B9F6CA;")
-            self.fuel_note = self._label(lay, "", f"font-size: 11px; color: {MUTED};", wrap=True)
+            self.fuel_big = self._label(lay, "", "big")
+            self.saved_big = self._label(lay, "", "value", wrap=True)
+            self.co2_big = self._label(lay, "", "value")
+            self.fuel_note = self._label(lay, "", "small", wrap=True)
         if "speed" in self.widgets:
-            self.speed_big = self._label(lay, "", "font-size: 18px; font-weight: 800; color: #FFD740;", wrap=True)
-            self.speed_note = self._label(lay, "", f"font-size: 11px; color: {MUTED};", wrap=True)
+            self.speed_big = self._label(lay, "", "value", wrap=True)
+            self.speed_note = self._label(lay, "", "small", wrap=True)
         if "wind_load" in self.widgets:
-            self._label(lay, "WIND LOAD ON THE TOWER", "font-size: 13px; font-weight: 800; color: #FFC400;")
             grid = QGridLayout()
-            grid.setHorizontalSpacing(10)
+            grid.setHorizontalSpacing(12)
             grid.setVerticalSpacing(3)
             for col, text in enumerate(("Wind", "Speed", "Force", "Base moment")):
-                h = QLabel(text)
-                h.setStyleSheet(f"font-size: 11px; font-weight: 700; color: {MUTED};")
-                grid.addWidget(h, 0, col)
+                h = _role(QLabel(text), "key")
+                grid.addWidget(h, 0, col, alignment=Qt.AlignLeft if col == 0 else Qt.AlignRight)
                 self._labels.append(h)
             self._table = grid
             self._table_cells: list[list[QLabel]] = []
             lay.addLayout(grid)
-            self.worst_label = self._label(lay, "", "font-size: 13px; font-weight: 800; color: #FFC400;")
-        self.sdg_label = self._label(lay, "", "font-size: 12px; font-weight: 700; color: #5CF2B0;")
+            self.worst_label = self._label(lay, "", "value")
+        self.sdg_label = self._label(lay, "", "small")
         self.sdg_label.setText(self._sdg_text())
 
         self.setVisible(bool(self.widgets))
@@ -360,9 +352,8 @@ class SustainabilityOverlay(QFrame):
         self.setFixedWidth(width)
         self.setFixedHeight(max(self.layout().totalHeightForWidth(width), self.layout().totalMinimumSize().height()))
 
-    def _label(self, lay, text: str, style: str, wrap: bool = False) -> QLabel:
-        lb = QLabel(text)
-        lb.setStyleSheet(style)
+    def _label(self, lay, text: str, role: str, wrap: bool = False) -> QLabel:
+        lb = _role(QLabel(text), role)
         lb.setWordWrap(wrap)
         lay.addWidget(lb)
         self._labels.append(lb)
@@ -371,13 +362,13 @@ class SustainabilityOverlay(QFrame):
     def _sdg_text(self) -> str:
         tags = []
         if "fuel" in self.widgets or "speed" in self.widgets:
-            tags.append("SDG 13 · Climate action")
+            tags.append("SDG 9 · Industry, innovation & infrastructure")  # the plane and the car
         if "wind_load" in self.widgets:
-            tags.append("SDG 9 · Industry, innovation & infrastructure")
-        return "\n".join(tags)
+            tags.append("SDG 11 · Sustainable cities & communities")  # the tower
+        return "   ".join(tags)
 
     def all_text(self) -> str:
-        """Everything the overlay currently says (used by tests and by the remote status page)."""
+        """Everything the section currently says (used by tests and by the remote status page)."""
         parts = [lb.text() for lb in self._labels]
         parts += [c.text() for row in getattr(self, "_table_cells", []) for c in row]
         return "\n".join(parts)
@@ -395,7 +386,7 @@ class SustainabilityOverlay(QFrame):
             self._set_wind_load(metrics, worst_direction_deg)
 
     def _set_fuel(self, metrics: dict) -> None:
-        """Fuel card: burned, saved against the object's own worst simulated angle, CO2 saved.
+        """Fuel lines: burned, saved against the object's own worst simulated angle, CO2 saved.
 
         0606 link: saved = (P_worst - P) x litres per kWh, a difference of two cubic power laws, so it is
         zero at the worst angle itself. The reference angle is the same for every state of an object, so
@@ -403,21 +394,54 @@ class SustainabilityOverlay(QFrame):
         """
         burn = _num(metrics, "fuel_burn_l_per_hr")
         saved, co2 = _num(metrics, "fuel_saved_l_per_hr"), _num(metrics, "co2_saved_kg_per_hr")
-        self.fuel_big.setText(f"Fuel burned: {burn:,.1f} L/h")
         ref = metrics.get("reference_direction_deg")
         has_ref = isinstance(ref, (int, float)) and not isinstance(ref, bool)
+        # An aircraft is compared with its BEST angle (highest L/D), so it shows extra fuel, not fuel saved.
+        best = bool(metrics.get("reference_is_best"))
+        if best:
+            self._set_fuel_vs_best(metrics, burn, saved, ref if has_ref else None)
+            return
+        self.fuel_big.setText(f"Fuel burned: {burn:,.1f} L/h")
         if has_ref and abs(_num(metrics, "direction_deg") - float(ref)) < 1e-6:
-            self.saved_big.setText("This is the worst angle tested")
+            self.saved_big.setText("This is the best angle tested" if best else "This is the worst angle tested")
             self.co2_big.setText("")
         else:
             where = f" ({float(ref):g}°)" if has_ref else ""
-            self.saved_big.setText(f"Saved vs worst angle{where}: {saved:,.1f} L/h")
-            self.co2_big.setText(f"CO₂ saved: {co2:,.1f} kg/h")
+            if best:
+                self.saved_big.setText(f"Extra vs best angle{where}: {saved:,.1f} L/h")
+                self.co2_big.setText(f"Extra CO₂: {co2:,.1f} kg/h")
+            else:
+                self.saved_big.setText(f"Saved vs worst angle{where}: {saved:,.1f} L/h")
+                self.co2_big.setText(f"CO₂ saved: {co2:,.1f} kg/h")
         eval_v = _num(metrics, "eval_speed_m_s")
         at_cruise = eval_v > 0.0 and abs(eval_v - _num(metrics, "wind_speed_m_s")) > 1e-6
         altitude = _num(metrics, "eval_altitude_km")  # from the config's cruise block; 0 = not given
         where_cruise = f"{altitude:g} km, " if altitude > 0.0 else ""
-        self.fuel_note.setText(f"at cruise ({where_cruise}{eval_v:.0f} m/s)" if at_cruise else "")
+        note = f"at cruise ({where_cruise}{eval_v:.0f} m/s)" if at_cruise else ""
+        self.fuel_note.setText(note)
+
+    def _set_fuel_vs_best(self, metrics: dict, burn: float, extra: float, ref) -> None:
+        """Aircraft: extra fuel as a PERCENTAGE of the fuel at the best angle, never as litres.
+
+        Level flight: lift = weight, so drag = weight / (L/D) and fuel is proportional to 1 / (L/D). Our
+        absolute drag is too high (the mesh is still coarse for a 79 m wing), but the RATIO between two angles
+        is reliable, so the panel shows only ratios:
+            extra % = extra / (burn - extra) x 100 = (L/D_best / L/D - 1) x 100,
+            L/D_best = L/D x burn / (burn - extra)      (both from fuel proportional to 1 / (L/D)).
+        """
+        ld = _num(metrics, "lift_to_drag")
+        at_best = ref is not None and abs(_num(metrics, "direction_deg") - float(ref)) < 1e-6
+        base = burn - extra  # fuel at the best angle
+        where = f" ({float(ref):g}°)" if ref is not None else ""
+        if at_best or base <= 0.0:
+            self.fuel_big.setText("This is the best angle tested")
+            self.saved_big.setText(f"Lift ÷ drag = {ld:.1f}, the highest of all nine angles" if ld > 0 else "")
+        else:
+            pct = extra / base * 100.0
+            self.fuel_big.setText(f"Fuel vs best angle{where}: +{pct:,.0f} %")
+            self.saved_big.setText(f"Lift ÷ drag = {ld:.1f} here, {ld * burn / base:.1f} at the best angle")
+        self.co2_big.setText("CO₂ changes by the same percentage as the fuel")
+        self.fuel_note.setText("level flight: lift = weight, so drag = weight ÷ (L/D) and fuel ∝ 1 ÷ (L/D)")
 
     def _set_wind_load(self, metrics: dict, worst_direction_deg: float | None) -> None:
         rows = metrics.get("wind_load") or []
@@ -425,9 +449,8 @@ class SustainabilityOverlay(QFrame):
             r = len(self._table_cells) + 1
             cells = []
             for col in range(4):
-                c = QLabel("")
-                c.setStyleSheet(f"font-size: 12px; font-weight: {'700' if col == 0 else '600'}; color: {TEXT};")
-                self._table.addWidget(c, r, col)
+                c = _role(QLabel(""), "value" if col else "key")
+                self._table.addWidget(c, r, col, alignment=Qt.AlignLeft if col == 0 else Qt.AlignRight)
                 cells.append(c)
             self._table_cells.append(cells)
         for cells, row in zip(self._table_cells, rows):
@@ -443,7 +466,7 @@ class SustainabilityOverlay(QFrame):
 
 
 # --------------------------------------------------------------------------------------------------
-# Colour bar and legend (Qt-drawn: VTK's built-in fonts have no Greek letters and overlap their labels)
+# Colour-bar tick labels
 # --------------------------------------------------------------------------------------------------
 _SUPERSCRIPT = str.maketrans("-0123456789", "⁻⁰¹²³⁴⁵⁶⁷⁸⁹")
 
@@ -476,85 +499,3 @@ def colorbar_ticks(lo: float, hi: float, log: bool, n_linear: int = 5) -> list[t
         return [((math.log10(v) - a) / (b - a), compact_si(v)) for v in mids]
     fracs = (0.0, 0.5, 1.0) if n_linear <= 3 else (0.0, 0.25, 0.5, 0.75, 1.0)
     return [(f, compact_si(lo + f * (hi - lo))) for f in fracs]
-
-
-class ColorBar(QWidget):
-    """A titled horizontal colour bar with tick labels, drawn with QPainter."""
-
-    def __init__(self, title: str, cmap: str, log: bool = False, parent=None):
-        super().__init__(parent)
-        self.title, self.log = title, log
-        self.lo, self.hi = 0.0, 1.0
-        import matplotlib
-
-        cm = matplotlib.colormaps[cmap]
-        self._colors = [QColor.fromRgbF(*cm(i / 31.0)[:3]) for i in range(32)]
-        self.setFixedHeight(66)
-        self.setAttribute(Qt.WA_StyledBackground, False)
-
-    def set_range(self, lo: float, hi: float) -> None:
-        self.lo, self.hi = float(lo), float(hi)
-        self.update()
-
-    def paintEvent(self, event) -> None:  # noqa: N802
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        p.fillRect(self.rect(), QColor(8, 13, 24, 225))
-        p.setPen(QPen(QColor("#2A3A57"), 1))
-        p.drawRect(self.rect().adjusted(0, 0, -1, -1))
-        p.setPen(QColor(TEXT))
-        f = QFont(self.font())
-        f.setPixelSize(13)
-        f.setBold(True)
-        p.setFont(f)
-        p.drawText(QRectF(8, 4, self.width() - 16, 18), Qt.AlignCenter, self.title)
-
-        x0, x1, y0, h = 38.0, self.width() - 38.0, 26.0, 14.0
-        grad = QLinearGradient(QPointF(x0, 0), QPointF(x1, 0))
-        for i, c in enumerate(self._colors):
-            grad.setColorAt(i / (len(self._colors) - 1), c)
-        p.fillRect(QRectF(x0, y0, x1 - x0, h), grad)
-        p.setPen(QPen(QColor("#CBD5E1"), 1))
-        p.drawRect(QRectF(x0, y0, x1 - x0, h))
-        f.setBold(False)
-        f.setPixelSize(12)
-        p.setFont(f)
-        p.setPen(QColor(TEXT))
-        n = 5 if self.width() >= 460 else 3  # fewer labels on a narrow bar so they never touch
-        for frac, text in colorbar_ticks(self.lo, self.hi, self.log, n):
-            x = x0 + frac * (x1 - x0)
-            p.drawLine(QPointF(x, y0 + h), QPointF(x, y0 + h + 4))
-            p.drawText(QRectF(x - 40, y0 + h + 5, 80, 16), Qt.AlignCenter, text)
-        p.end()
-
-
-class TermLegend(QFrame):
-    """Legend for the dominant-term streamline colours (view 2): a colour swatch per Navier-Stokes term."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setObjectName("termLegend")
-        self.setAttribute(Qt.WA_StyledBackground, True)
-        self.setStyleSheet(
-            f"QFrame#termLegend {{ background-color: {PANEL_BG}; border: 1px solid #2A3A57; border-radius: 8px; }}"
-            f"QLabel {{ border: none; background: transparent; color: {TEXT}; }}"
-        )
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(12, 8, 12, 8)
-        lay.setSpacing(4)
-        hdr = QLabel("Streamline colour = largest term")
-        hdr.setStyleSheet(f"font-size: 12px; font-weight: 800; color: {MUTED};")
-        lay.addWidget(hdr)
-        self.entries: dict[str, QLabel] = {}
-        for name in TERM_NAMES:
-            row = QHBoxLayout()
-            swatch = QFrame()
-            swatch.setFixedSize(26, 6)
-            swatch.setStyleSheet(f"background-color: {TERM_COLORS[name]}; border: none; border-radius: 3px;")
-            text = QLabel(TERM_LABELS_2LINE[name])
-            text.setStyleSheet("font-size: 12px; font-weight: 600;")
-            row.addWidget(swatch)
-            row.addWidget(text)
-            row.addStretch()
-            lay.addLayout(row)
-            self.entries[name] = text

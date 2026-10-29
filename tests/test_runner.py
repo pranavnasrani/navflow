@@ -16,7 +16,7 @@ import pytest
 import trimesh
 
 from solver import run_openfoam
-from solver.foam.geometry import prepare_model
+from solver.foam.geometry import load_prepared, prepare_model
 from solver.foam.queue import RunRecord, load_queue, save_queue
 from solver.foam.runner import (EXIT_MARKER, FORCE_SEP, FoamContainer, RunContext, RunnerError,
                                 SubprocessExecutor, check_mesh_log, mesh_cell_count, mesh_only, run_batch, run_one, stop_flag)
@@ -222,7 +222,8 @@ def models(tmp_path_factory):
     for obj_id in ("airplane", "f1_car"):
         src = tmp_path_factory.mktemp(obj_id) / "box.stl"
         trimesh.creation.box(extents=(4.0, 1.0, 1.0)).export(src)
-        out[obj_id] = prepare_model(src, replace(OBJECTS[obj_id], real_size_m=4.0, size_axis="x"))
+        out[obj_id] = prepare_model(src, replace(OBJECTS[obj_id], real_size_m=4.0, size_axis="x",
+                                                 base_rotation_deg=(0.0, 0.0, 0.0)))
     return out
 
 
@@ -685,7 +686,7 @@ def test_short_real_run(tmp_path):
     settings = replace(SETTINGS, base_cells_per_size=4, surface_refinement=(2, 3),
                        volume=f"navflow-test-{uuid.uuid4().hex[:8]}")
     cfd = OBJECTS["airplane"]
-    model0 = prepare_model(ROOT / "assets/models/airplane/model.stl", cfd)
+    model0 = load_prepared(ROOT / "assets/models/airplane/model.stl", cfd)
     ex = RecordingExecutor()
     name = f"navflow-test-{uuid.uuid4().hex[:8]}"
     container = FoamContainer(settings, name, ex)
@@ -807,3 +808,16 @@ def test_runner_still_fails_on_a_hard_mesh_error(tmp_path, models):
     rec = run_one(waiting(), ctx)
     assert rec.status == "failed" and "negative cell volume" in rec.log
     assert ex.count("decomposePar") == 0
+
+
+def test_run_directions_option_passes_the_chosen_indices(tmp_path, models, monkeypatch):
+    runs = tmp_path / "runs" / "full"
+    runs.mkdir(parents=True)
+    monkeypatch.setattr(run_openfoam, "_runs_root", lambda preview: runs)
+    monkeypatch.setattr(run_openfoam, "_build_context", lambda args, ex, root, cap, obj_ids, **kw: make_ctx(tmp_path, models, ex))
+    seen = []
+    monkeypatch.setattr(run_openfoam, "run_batch", lambda obj_ids, ctx, machine, directions=None: seen.append((machine, directions)) or [])
+    ex = FakeExecutor(scenario=steady)
+    assert run_openfoam.main(["run", "--objects", "airplane", "--machine", "mini", "--directions", "1", "3"], ex=ex) == 0
+    assert run_openfoam.main(["run", "--objects", "airplane"], ex=ex) == 0
+    assert seen == [("mini", [1, 3]), ("laptop", None)]

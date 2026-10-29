@@ -54,7 +54,7 @@ class ObjectCfd:
     floor: str  # "none" | "moving" | "rough" | "slip"
     density_kg_m3: float
     kinematic_viscosity_m2_s: float
-    cruise: dict | None  # {"density_kg_m3", "speed_m_s"}
+    cruise: dict | None  # {"density_kg_m3", "speed_m_s", "altitude_km", "mass_kg"} (mass: level-flight fuel)
     abl_z0_m: float | None
     widgets: tuple[str, ...]
     surface_refinement: tuple[int, int] | None  # per-object override

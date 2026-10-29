@@ -38,7 +38,9 @@ from solver.foam.convergence import load_forces
 from solver.foam.geometry import frontal_area, rotation_matrix, run_geometry, seed_rake, view_bounds, wand_heights
 from solver.foam.ns_terms import ns_term_fields, ns_term_summary
 from solver.foam.settings import FoamSettings, ObjectCfd
-from solver.foam.sustainability import drag_power_kw, fuel_and_co2, fuel_burn_l_per_hr, speed_gain_pct, wind_load_table
+from solver.foam.sustainability import (
+    drag_power_kw, fuel_and_co2, fuel_burn_l_per_hr, level_flight_drag_n, speed_gain_pct, wind_load_table,
+)
 
 FINISHED = ("done", "flagged")
 FIELD_NAMES = {"instant": ("U", "p", "k"), "mean": ("UMean", "pMean", "kMean")}
@@ -98,15 +100,42 @@ def _settled(history: np.ndarray, flagged: bool, window: int) -> np.ndarray:
     return rows[:, 1:4].mean(axis=0)
 
 
+PRESSURE_NEIGHBOURS = 8  # solver faces averaged for each display vertex
+SAME_SIDE_COS = 0.2  # a face counts only if its normal is within ~78 degrees of the vertex normal
+
+
 def _pressure_on_model(patch: pv.PolyData, name: str, model0: trimesh.Trimesh, rot: np.ndarray, rho: float) -> np.ndarray:
-    """Pascals at every vertex of the un-rotated model: nearest patch cell centre of the rotated model."""
-    if name in patch.cell_data:
-        sites, values = patch.cell_centers().points, np.asarray(patch.cell_data[name])
+    """Pascals at every vertex of the un-rotated model, from the solver's surface faces.
+
+    The display model and the solver's surface are two different meshes of the same shape, so each
+    vertex takes a weighted average of the PRESSURE_NEIGHBOURS nearest solver faces:
+        p = sum(w_i p_i) / sum(w_i),   w_i = 1 / d_i^2   (inverse-square distance weighting)
+    Only faces on the same side of the surface count (their unit normals n_i and the vertex normal n
+    have n . n_i > SAME_SIDE_COS, a dot product / angle-between-vectors test), so the two faces of a thin
+    wing never mix. A single nearest face gave blotchy, stair-stepped contours.
+    """
+    surf = patch.triangulate()
+    if name in surf.cell_data:
+        normals = surf.compute_normals(cell_normals=True, point_normals=False, split_vertices=False,
+                                       consistent_normals=False, auto_orient_normals=False).cell_data["Normals"]
+        sites, values = surf.cell_centers().points, np.asarray(surf.cell_data[name], dtype=float)
     else:
-        sites, values = np.asarray(patch.points), np.asarray(patch.point_data[name])
+        normals = surf.compute_normals(cell_normals=False, point_normals=True, split_vertices=False,
+                                       consistent_normals=False, auto_orient_normals=False).point_data["Normals"]
+        sites, values = np.asarray(surf.points), np.asarray(surf.point_data[name], dtype=float)
     run_vertices = np.asarray(model0.vertices) @ rot.T  # R v, written for row vectors
-    _, nearest = cKDTree(sites).query(run_vertices)
-    return (values[nearest] * rho).astype(np.float32)  # p is kinematic (p / rho): multiply by rho
+    run_normals = np.asarray(model0.vertex_normals) @ rot.T
+    k = min(PRESSURE_NEIGHBOURS, len(sites))
+    dist, idx = cKDTree(sites).query(run_vertices, k=k)
+    dist, idx = dist.reshape(len(run_vertices), k), idx.reshape(len(run_vertices), k)
+    cos = np.einsum("vj,vkj->vk", run_normals, np.asarray(normals)[idx])
+    if np.median(cos[:, 0]) < 0:  # OpenFOAM's boundary normals point out of the air, i.e. into the model
+        cos = -cos
+    w = (cos > SAME_SIDE_COS) / np.maximum(dist, 1e-12) ** 2
+    lonely = w.sum(axis=1) == 0  # no same-side face nearby: fall back to the nearest face
+    w[lonely, 0] = 1.0
+    p = (w * values[idx]).sum(axis=1) / w.sum(axis=1)
+    return (p * rho).astype(np.float32)  # p is kinematic (p / rho): multiply by rho
 
 
 def _clip(grid: pv.UnstructuredGrid, box: np.ndarray, keep: tuple[str, ...]) -> pv.UnstructuredGrid:
@@ -126,18 +155,23 @@ def _clip(grid: pv.UnstructuredGrid, box: np.ndarray, keep: tuple[str, ...]) -> 
 
 def _streamlines(
     grid: pv.DataSet, seeds: np.ndarray, u_name: str, k_name: str, max_length: float, rot: np.ndarray
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """NaN-joined lines (model frame), k along them and the dominant N-S term along them."""
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """NaN-joined lines (model frame), k, the dominant N-S term and the air speed |U| along them.
+
+    Maths link (IGCSE 0606): the speed is the magnitude of the 3D velocity vector,
+    |U| = sqrt(u^2 + v^2 + w^2) (Pythagoras in three dimensions).
+    """
     out = grid.streamlines_from_source(
         pv.PolyData(seeds), vectors=u_name, integration_direction="forward",
         max_length=max_length, compute_vorticity=False,
     )
     pts_all = np.asarray(out.points)
-    lines_out, k_out, dom_out = [], [], []
+    lines_out, k_out, dom_out, speed_out = [], [], [], []
     if out.n_points:
         terms = np.column_stack([out.point_data[f"ns_{n}"] for n in ("convective", "pressure", "viscous")])
         dominant = terms.argmax(axis=1)  # the three magnitudes are interpolated; take the largest on the line
         k_all = np.asarray(out.point_data[k_name], dtype=float)
+        speed_all = np.linalg.norm(np.asarray(out.point_data[u_name], dtype=float), axis=1)  # |U| at each point
         conn, i = np.asarray(out.lines), 0
         while i < len(conn):
             n = int(conn[i])
@@ -148,12 +182,14 @@ def _streamlines(
             lines_out += [pts_all[ids] @ rot, np.full((1, 3), np.nan)]  # R^-1 = R^T: back to the model frame
             k_out += [k_all[ids], [np.nan]]
             dom_out += [dominant[ids], [-1]]
+            speed_out += [speed_all[ids], [np.nan]]
     if not lines_out:
-        return np.empty((0, 3), np.float32), np.empty(0, np.float32), np.empty(0, np.int8)
+        return np.empty((0, 3), np.float32), np.empty(0, np.float32), np.empty(0, np.int8), np.empty(0, np.float32)
     return (
         np.vstack(lines_out).astype(np.float32),
         np.concatenate(k_out).astype(np.float32),
         np.concatenate(dom_out).astype(np.int8),
+        np.concatenate(speed_out).astype(np.float32),
     )
 
 
@@ -176,6 +212,14 @@ def _metrics(
     rho_c = cfd.cruise["density_kg_m3"] if cfd.cruise else rho
     v_c = cfd.cruise["speed_m_s"] if cfd.cruise else v
     eval_power = drag_power_kw(cd, area, rho_c, v_c)
+    # Lift-to-drag ratio L/D = F_lift / F_drag (a ratio, so it has no units).
+    lift_to_drag = float(force[2] / force[0]) if force[0] > 0 else 0.0
+    # An aircraft with a mass in its cruise block flies level: D = W / (L/D), power P = D v (F v, in kW).
+    # An angle with no upward lift cannot fly level, so it keeps the Cd A power above.
+    mass = (cfd.cruise or {}).get("mass_kg")
+    level_drag = level_flight_drag_n(float(mass), lift_to_drag) if mass else None
+    if level_drag is not None:
+        eval_power = level_drag * v_c / 1000.0
     base_moment = float(np.hypot(moment[0], moment[1]))  # |(Mx, My)|: overturning moment about the base centre
     metrics = {
         "direction_deg": float(meta["direction_deg"]),
@@ -189,6 +233,7 @@ def _metrics(
         "frontal_area_m2": float(area),
         "drag_power_kw": float(drag_power_kw(cd, area, rho, v)),
         "base_moment_nm": base_moment,
+        "lift_to_drag": lift_to_drag,
         "iterations": int(meta["iterations"]),
         "converged": bool(meta["converged"]),
         "filled_from": None,
@@ -201,6 +246,8 @@ def _metrics(
         "co2_saved_kg_per_hr": 0.0,
         "speed_gain_pct": 0.0,
         "reference_direction_deg": float(meta["direction_deg"]),
+        # False: savings against the worst angle. True: an aircraft's extra fuel against its best L/D angle.
+        "reference_is_best": bool(mass),
     }
     if "wind_load" in cfd.widgets:
         # The wind pushes the tower sideways: use the horizontal force |(Fx, Fy)|, like the moment's |(Mx, My)|.
@@ -209,23 +256,29 @@ def _metrics(
 
 
 def _apply_reference(metrics: dict, ref: dict, obj_config: dict) -> None:
-    """Fill in the savings of one state against the reference state `ref` (the object's worst angle).
+    """Fill in the savings of one state against the reference state `ref`.
 
-    Maths link (IGCSE 0606): the drag power at the evaluation condition is P = 1/2 rho (Cd A) v^3.
+    The reference is the object's worst angle, or an aircraft's best L/D angle (reference_is_best).
+    Maths link (IGCSE 0606): the drag power at the evaluation condition is P = 1/2 rho (Cd A) v^3,
+    or P = (W / (L/D)) v for an aircraft in level flight.
       * fuel saved   = (P_ref - P) x litres per kWh, never below 0 (a difference of two powers);
-      * CO2 saved    = fuel saved x kg CO2 per litre (direct proportion);
+        for the best angle the sign flips: extra fuel = (P - P_best) x litres per kWh, also never below 0;
+      * CO2          = fuel x kg CO2 per litre (direct proportion);
       * speed gain   = ((Cd A)_ref / (Cd A))^(1/3) - 1, because at equal power v is proportional to (Cd A)^(-1/3).
+        Only meaningful against the worst angle, so it is 0 against the best.
     Everything stays a plain float so the state manager can blend it linearly between angles.
     """
+    best = bool(ref.get("reference_is_best"))
+    power, ref_power = metrics["eval_drag_power_kw"], ref["eval_drag_power_kw"]
     fuel, co2 = fuel_and_co2(
-        metrics["eval_drag_power_kw"], ref["eval_drag_power_kw"],
+        ref_power if best else power, power if best else ref_power,
         float(obj_config["fuel_burn_factor_l_per_kwh"]), float(obj_config["co2_kg_per_l_fuel"]),
     )
     cda = metrics["drag_coefficient_cd"] * metrics["frontal_area_m2"]
     ref_cda = ref["drag_coefficient_cd"] * ref["frontal_area_m2"]
     metrics["fuel_saved_l_per_hr"] = float(fuel)
     metrics["co2_saved_kg_per_hr"] = float(co2)
-    metrics["speed_gain_pct"] = float(speed_gain_pct(cda, ref_cda))
+    metrics["speed_gain_pct"] = 0.0 if best else float(speed_gain_pct(cda, ref_cda))
     metrics["reference_direction_deg"] = float(ref["direction_deg"])
 
 
@@ -305,9 +358,13 @@ def import_object(
         for idx, (result, meta) in sorted(runs.items())
     }
 
-    # The sustainability reference is the object's own worst FINISHED direction (largest drag power). It is only
-    # known once every finished direction has been read, so the savings are filled in as a second pass.
-    ref_idx = max(states, key=lambda j: states[j]["metrics"]["eval_drag_power_kw"])
+    # The sustainability reference is the object's own worst FINISHED direction (largest drag power), or for an
+    # aircraft its best one (largest L/D, so the least level-flight drag). It is only known once every finished
+    # direction has been read, so the savings are filled in as a second pass.
+    if next(iter(states.values()))["metrics"]["reference_is_best"]:
+        ref_idx = max(states, key=lambda j: states[j]["metrics"]["lift_to_drag"])
+    else:
+        ref_idx = max(states, key=lambda j: states[j]["metrics"]["eval_drag_power_kw"])
     ref_metrics = dict(states[ref_idx]["metrics"])
     for st in states.values():
         _apply_reference(st["metrics"], ref_metrics, obj_config)
@@ -337,9 +394,10 @@ def import_object(
         payload[f"{s}_metrics"] = json.dumps(metrics)
         payload[f"{s}_pressure"] = src["pressure"]
         payload[f"{s}_ns_terms"] = json.dumps(src["ns_terms"])
-        for w, (lines, k, dominant) in enumerate(src["wands"]):
+        for w, (lines, k, dominant, speed) in enumerate(src["wands"]):
             key = wand_key(idx, w)
             payload[f"{key}_lines"], payload[f"{key}_k"], payload[f"{key}_dominant"] = lines, k, dominant
+            payload[f"{key}_speed"] = speed
     write_cache(out_path, payload)
 
     return {

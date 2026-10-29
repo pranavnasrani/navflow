@@ -31,8 +31,8 @@ def test_load_settings_values():
     assert [objs[k].speed_m_s for k in ("airplane", "f1_car", "building", "human")] == [102.0, 40.0, 50.0, 10.0]
     assert all(len(o.directions_deg) == 9 for o in objs.values())
     assert objs["f1_car"].floor == "moving" and objs["building"].floor == "rough" and objs["airplane"].floor == "none"
-    assert objs["airplane"].cruise == {"density_kg_m3": 0.364, "speed_m_s": 250.0, "altitude_km": 11}
-    assert objs["airplane"].widgets == ("fuel", "speed") and objs["building"].widgets == ("wind_load",)
+    assert objs["airplane"].cruise == {"density_kg_m3": 0.364, "speed_m_s": 250.0, "altitude_km": 11, "mass_kg": 500000}
+    assert objs["airplane"].widgets == ("fuel",) and objs["building"].widgets == ("wind_load",)
 
 
 def test_load_settings_meshing_and_object_details():
@@ -43,7 +43,8 @@ def test_load_settings_meshing_and_object_details():
     assert objs["human"].widgets == ()
     assert objs["human"].cruise is None and objs["airplane"].abl_z0_m is None
     assert objs["building"].abl_z0_m == 0.5
-    assert all(o.surface_refinement is None for o in objs.values())
+    assert objs["airplane"].surface_refinement == (6, 7)  # finer surface cells for the thin wings
+    assert all(o.surface_refinement is None for k, o in objs.items() if k != "airplane")
     assert objs["airplane"].directions_deg == (0, 2, 4, 6, 8, 10, 12, 14, 16)
     assert objs["building"].directions_deg[1] == 7.5 and objs["human"].directions_deg[-1] == 180
     assert (objs["airplane"].real_size_m, objs["airplane"].size_axis) == (72.7, "x")
@@ -51,7 +52,11 @@ def test_load_settings_meshing_and_object_details():
     assert objs["airplane"].rotation_axis == "y" and objs["f1_car"].rotation_axis == "z"
     assert objs["human"].floor == "slip"
     assert all(o.density_kg_m3 == 1.225 and o.kinematic_viscosity_m2_s == 1.5e-5 for o in objs.values())
-    assert all(o.base_rotation_deg == (0.0, 0.0, 0.0) for o in objs.values())
+    # Real models (2026-10-27): A380 nose was +y, RB22 nose was -y, Burj and human upright.
+    assert objs["airplane"].base_rotation_deg == (0.0, 0.0, 90.0)
+    assert objs["f1_car"].base_rotation_deg == (0.0, 0.0, -90.0)
+    assert objs["building"].base_rotation_deg == objs["human"].base_rotation_deg == (0.0, 0.0, 0.0)
+    assert objs["f1_car"].real_size_m == 5.4
     assert all(not hasattr(o, "reference_cd") for o in objs.values())
     assert all("reference_cd" not in o["cfd"] for o in raw["objects"])
     assert objs["airplane"].direction_label == "Angle of attack"

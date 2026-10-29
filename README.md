@@ -87,7 +87,7 @@ Demonstrating why streamlining cutting frontal area or drag coefficient saves ma
 
 ## 🛠️ Regenerating CFD States & Using Custom 3D Models
 
-### Using Custom 3D Models (.stl, .obj, .ply, .glb, .gltf)
+### Using Custom 3D Models (.stl, .obj, .ply, .glb, .gltf, .blend, .fbx)
 Put each download in its own folder, one file per object:
 - `assets/models/incoming/airplane/`
 - `assets/models/incoming/f1_car/`
@@ -95,10 +95,14 @@ Put each download in its own folder, one file per object:
 - `assets/models/incoming/human/`
 
 (or pass the file with `--src <file>`). `prepare_model.py` writes the tunnel-ready result to `assets/models/<object>/model.stl`.
+.blend, .fbx, .glb and .gltf files are exported by Blender first (`brew install --cask blender`). Display models are made of
+many open parts, so add `--wrap 500` to shrink-wrap them into one closed skin (cube size = longest side / 500).
+The current models: Singapore Airlines A380 (`--wrap 500 --drop gears`, landing gear left out for cruise),
+Red Bull RB22 (`--wrap 500`), Burj Khalifa (`--wrap 400`).
 
 Then prepare, simulate and import (see `CLAUDE.md` for the full command list):
 ```bash
-./.venv/bin/python solver/prepare_model.py --object airplane      # (or add --src <file>) check the preview.png it writes
+./.venv/bin/python solver/prepare_model.py --object airplane --wrap 500 --drop gears   # check the preview.png it writes
 ./.venv/bin/python solver/run_openfoam.py run --objects airplane --preview   # quick 3-direction check
 ./.venv/bin/python solver/run_openfoam.py run --objects airplane              # all 9 directions
 ./.venv/bin/python solver/import_results.py                                   # -> assets/cache/*.npz

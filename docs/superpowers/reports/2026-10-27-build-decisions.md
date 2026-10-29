@@ -16,6 +16,7 @@ Branch `feat/openfoam-pipeline` (from `main` at 8338a60; `v1-fallback` tags the 
    - *Cost if wrong:* judges must be told the bar includes turbulence, not just molecular viscosity.
 2. **Fuel and CO₂ savings.** These are now measured against the object's own worst simulated wind angle, not a "brick" with C_d = 1.0. The old comparison claimed the plane saved 67,200 L/h, while a real A380 burns about 12,000 L/h.
    - *Cost if wrong:* savings are smaller, and zero at the worst angle.
+   - *Update, 28 Oct (plane only):* the plane is now compared with its **best** angle (highest lift-to-drag ratio), and its panel shows the extra fuel against that angle. In level flight lift equals weight, so drag = weight ÷ (L/D), using a 500 t cruise mass. Its mesh is two levels finer (`surface_refinement` 6–7, about 1.9 M cells), because the preview's coarse wings gave L/D of about 3, while a real airliner gets about 15–20. The plane's top-speed line is gone: against a best angle it would only ever show a loss.
 3. **Sim folders in Docker.** Test, preview and full runs each get their own folder inside Docker, and only one solver runs per machine at a time.
    - *Cost if wrong:* you can't run a test while a batch is solving on the same Mac.
 4. **Never losing hours of work.** These cases no longer throw away or lose a run:
@@ -42,3 +43,13 @@ Branch `feat/openfoam-pipeline` (from `main` at 8338a60; `v1-fallback` tags the 
 - **Full run:** use both Macs. Pass `--machine mini` on the Mac mini.
 - **Import and commit:** run `import_results.py` and commit the new `assets/cache/*.npz` files. Until then the app exits with a message, because the committed caches are v1.
 - **Rehearsal:** do one full run of all four windows with the macropad, and the iPad on the phone hotspot.
+
+## Real models (27 Oct)
+
+- **Sources:** Singapore Airlines A380 (.fbx), Red Bull RB22 (.glb), Burj Khalifa (.blend). They are copied to `assets/models/incoming/<object>/`, which is git-ignored (92 MB). The human keeps the starter model.
+- **Conversion:** `prepare_model.py` exports .blend/.fbx/.glb through headless Blender (`solver/blender_export.py`), then `--wrap RES` shrink-wraps the open display parts into one closed skin (`geometry.wrap_surface`). Ruling: the skin sits about one cube outside the real surface (1 cm on the car), and rescaling to the real length removes most of that. *Cost if wrong:* drag is very slightly high, and slots narrower than about 2 cubes (2 cm on the car) are filled in.
+- **A380 landing gear** is left out (`--drop gears`), because the plane is evaluated at cruise.
+- **RB22 length** is set to 5.4 m, the model's own real-scale length; the config said 5.6.
+- **Base rotations:** airplane (0, 0, 90), f1_car (0, 0, -90), building (0, 0, 0). The previews were checked: nose into the wind, up is up.
+- **Full-setting meshes (direction 4):** A380 472k cells, RB22 385k, Burj 217k. All pass checkMesh; the plane and car have a few skewed faces, recorded as warnings.
+- **Mac mini:** Apple M4, 10 cores, 16 GB, reached over Tailscale at 100.114.120.115. It runs Docker through Colima (8 CPU / 12 GB VM). Its project copy is at `~/navflow` with its own `.venv`, and all 221 tests pass there.

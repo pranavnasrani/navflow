@@ -1,6 +1,7 @@
 """Command-line front end for the OpenFOAM batch runner.
 
     ./.venv/bin/python solver/run_openfoam.py run --objects airplane f1_car [--preview] [--machine laptop] [--retry-failed]
+        [--directions 0 4 8]
     ./.venv/bin/python solver/run_openfoam.py stop [--preview]
     ./.venv/bin/python solver/run_openfoam.py status [--preview] [--machine laptop]
     ./.venv/bin/python solver/run_openfoam.py test --object airplane --direction-index 0 --iterations 60 \
@@ -74,7 +75,9 @@ def cmd_run(args, ex: Executor) -> int:
         if reset:
             save_queue(qpath, records)
         print(f"Reset {reset} failed run{'' if reset == 1 else 's'} to waiting ({qpath.name}).")
-    done = run_batch(args.objects, ctx, args.machine, PREVIEW_DIRECTIONS if args.preview else None)
+    # --directions splits one object between machines (e.g. laptop 0 4 8 2 6, mini 1 3 5 7).
+    directions = PREVIEW_DIRECTIONS if args.preview else args.directions
+    done = run_batch(args.objects, ctx, args.machine, directions)
     for r in done:
         print(f"{r.run_id}: {r.status} ({r.iterations} iterations)")
     return 0
@@ -123,6 +126,8 @@ def make_parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run", parents=[common], help="run or resume this machine's queue")
     run.add_argument("--objects", nargs="+", required=True)
     run.add_argument("--preview", action="store_true", help="directions 0, 4, 8; cap 500; runs/preview")
+    run.add_argument("--directions", nargs="+", type=int, default=None,
+                     help="only these direction indices (to split a batch between machines)")
     run.add_argument("--retry-failed", action="store_true",
                      help="put this machine's failed runs back to waiting before the batch starts")
     run.set_defaults(func=cmd_run)
