@@ -345,7 +345,26 @@ class SustainabilityOverlay(QFrame):
         self.sdg_label = self._label(lay, "", "small")
         self.sdg_label.setText(self._sdg_text())
 
+        self._detailed = False
+        self.set_detailed(False)
         self.setVisible(bool(self.widgets))
+
+    def set_detailed(self, detailed: bool) -> None:
+        """Simple: the headline and one supporting line (for the tower, the strongest wind only).
+        Detailed: also the CO2 line, the formula notes and every row of the wind-load table."""
+        self._detailed = bool(detailed)
+        for name in ("co2_big", "fuel_note", "speed_note"):
+            lb = getattr(self, name, None)
+            if lb is not None:
+                lb.setVisible(self._detailed)
+        self._show_table_rows()
+
+    def _show_table_rows(self) -> None:
+        """The wind-load table keeps its last row (the strongest wind) in the simple view."""
+        rows = getattr(self, "_table_cells", [])
+        for i, cells in enumerate(rows):
+            for c in cells:
+                c.setVisible(self._detailed or i == len(rows) - 1)
 
     def fit(self, width: int) -> None:
         """Set the width and the height that matches it (wrapped text needs the height for that width)."""
@@ -458,6 +477,7 @@ class SustainabilityOverlay(QFrame):
             cells[1].setText(f"{_num(row, 'v_m_s'):.0f} m/s")
             cells[2].setText(format_si(_num(row, "force_n"), "N"))
             cells[3].setText(format_si(_num(row, "moment_nm"), "N·m"))
+        self._show_table_rows()
 
         if worst_direction_deg is None:
             self.worst_label.setText("")

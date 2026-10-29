@@ -266,16 +266,18 @@ class MonitorWindow(QMainWindow):
         grid.setColumnStretch(3, 1)
         lay.addLayout(grid)
         power_row = QHBoxLayout()
-        power_row.addWidget(label("Drag power  P = ½ρCdAV³", "key"))
+        power_key = label("Drag power  P = ½ρCdAV³", "key")
+        power_row.addWidget(power_key)
         power_row.addStretch()
         self.lbl_power = label("", "big")
         power_row.addWidget(self.lbl_power)
         lay.addLayout(power_row)
+        self._detail_only += [power_key, self.lbl_power]
 
-        self._detail_only += section("Navier–Stokes terms near the model")
+        # The Navier–Stokes bars are the point of the exhibit, so they stay in the simple panel too
+        section("Navier–Stokes terms")
         self.ns_panel = NsTermsPanel()
         lay.addWidget(self.ns_panel)
-        self._detail_only.append(self.ns_panel)
 
         widgets = tuple(self.cfd_cfg.get("widgets", ()))
         self.overlay = SustainabilityOverlay(widgets)
@@ -296,8 +298,6 @@ class MonitorWindow(QMainWindow):
 
         self._detail_only.append(self.lbl_info)
         lay.addStretch()
-        self.lbl_mode = label("", "small", wrap=True)
-        lay.addWidget(self.lbl_mode)
         self.lbl_run = label("", "console", wrap=True)
         lay.addWidget(self.lbl_run)
         self._detail_only.append(self.lbl_run)
@@ -404,16 +404,22 @@ class MonitorWindow(QMainWindow):
         self.txt_terms = {n: vtk.vtkTextActor() for n in TERM_NAMES}
         for name, actor in self.txt_terms.items():
             actor.SetInput("■  " + TERM_LABELS[name])
-        hint = ("Buttons 1–0: smoke wand  ·  Knob: wind direction  ·  Tab: change view  ·  Space: more / less detail\n"
-                "Drag: turn  ·  Pinch or ⌘ + scroll: zoom  ·  R: reset view")
-        if self.remote_url:
-            hint += f"\nRemote control: {self.remote_url}"
-        self.txt_hint.SetInput(hint)
+        self.txt_hint.SetInput(self._hint_text(False))
         for actor in (self.txt_title, self.txt_view, self.txt_hint, *self.txt_terms.values()):
             actor.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
             pl.renderer.AddViewProp(actor)
 
         self._fit_camera()
+
+    def _hint_text(self, detailed: bool) -> str:
+        """One short line for visitors; the camera keys and the remote address only in the detailed view."""
+        if not detailed:
+            return "1–0  smoke height    ·    Knob  wind direction    ·    Tab  view    ·    Space  more detail"
+        text = ("Buttons 1–0: smoke wand  ·  Knob: wind direction  ·  Tab: change view  ·  Space: less detail\n"
+                "Drag: turn  ·  Pinch or ⌘ + scroll: zoom  ·  R: reset view")
+        if self.remote_url:
+            text += f"\nRemote control: {self.remote_url}"
+        return text
 
     def _focus_bounds(self) -> np.ndarray:
         """The model's box plus room for the wake behind it, kept inside the display box."""
@@ -588,7 +594,10 @@ class MonitorWindow(QMainWindow):
             w.setVisible(self.detailed)
         if not self.obj_cfg.get("info_card"):
             self.lbl_info.setVisible(False)
-        self.lbl_mode.setText("Press Space for less detail" if self.detailed else "Press Space for the Navier–Stokes terms and more")
+        self.overlay.set_detailed(self.detailed)
+        self.ns_panel.caption.setVisible(self.detailed and self.height() >= 820)
+        self.txt_hint.SetInput(self._hint_text(self.detailed))
+        self.plotter.render()
 
     def reset_camera(self) -> None:
         self._fit_camera()
@@ -677,7 +686,7 @@ class MonitorWindow(QMainWindow):
         self.panel_layout.setContentsMargins(margin, int(26 * s), margin, 0)
         self.panel.setStyleSheet(panel_style(s))
         # On short windows the explanatory caption under the equation is dropped rather than squeezed
-        self.ns_panel.caption.setVisible(self.height() >= 820)
+        self.ns_panel.caption.setVisible(self.detailed and self.height() >= 820)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)

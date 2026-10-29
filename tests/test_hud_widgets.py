@@ -274,3 +274,19 @@ def test_overlay_fuel_note_is_wrapped(qapp):
     fuel.fit(340)
     assert fuel.height() >= fuel.sizeHint().height() - 1
 
+
+
+def test_overlay_simple_view_hides_the_extra_lines(qapp):
+    """Simple: headline and one supporting line, and only the strongest wind in the tower table. Detailed: all."""
+    car = SustainabilityOverlay(("fuel", "speed"), None)
+    car.set_metrics(_fuel_metrics(8.0))
+    assert car.fuel_big.isHidden() is False and car.co2_big.isHidden() and car.speed_note.isHidden()
+    car.set_detailed(True)
+    assert not car.co2_big.isHidden() and not car.speed_note.isHidden()
+
+    tower = SustainabilityOverlay(("wind_load",), None)
+    tower.set_metrics({"wind_load": _wind_load(), "direction_deg": 15.0}, 37.5)
+    visible = [row[0].isHidden() is False for row in tower._table_cells]
+    assert visible == [False] * (len(visible) - 1) + [True]
+    tower.set_detailed(True)
+    assert all(row[0].isHidden() is False for row in tower._table_cells)
