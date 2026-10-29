@@ -29,6 +29,8 @@ one colour scale (Cp = 1 where the air is brought to rest, below 0 where it is s
 
 from __future__ import annotations
 
+import math
+import time
 from pathlib import Path
 
 import numpy as np
@@ -57,6 +59,7 @@ from app.hud_widgets import (
     wind_arrow_geometry,
 )
 from app.input_controller import ExhibitionInputController
+from app.explainers import HIGH_LABEL, LOW_LABEL, caption_for
 from app.state_manager import ObjectStateManager
 
 VIEW_NAMES = (
@@ -81,6 +84,7 @@ DARK = "#2E3744"
 FONT_FILE = Path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf")  # VTK's own fonts have no Greek letters
 DISPLAY_TRIANGLES = 100_000  # enough for a monitor seen from 1-2 m; the full car mesh is 344,000
 PANEL_MIN_WIDTH, PANEL_MAX_WIDTH = 340, 520
+ORBIT_DEGREES, ORBIT_SECONDS = 22.0, 45.0  # the show swings the camera +-22 degrees, one full swing in 45 s
 
 
 
@@ -175,6 +179,7 @@ class MonitorWindow(QMainWindow):
         self.setFocusPolicy(Qt.StrongFocus)
 
         self.detailed = False
+        self._show, self._show_step = False, 0  # the idle show (see app/explainers.py)
 
         self._build_ui()
         self._setup_3d_scene()
@@ -186,6 +191,13 @@ class MonitorWindow(QMainWindow):
         self.controller.view_changed.connect(self.on_view_changed)
         self.controller.detail_changed.connect(self.on_detail_changed)
         self.controller.camera_reset.connect(self.reset_camera)
+        self.controller.show_changed.connect(self.on_show_changed)
+        self.controller.show_step_changed.connect(self.on_show_step)
+
+        self._orbit_angle, self._orbit_t0 = 0.0, 0.0
+        self.orbit_timer = QTimer(self)  # runs only while the idle show runs
+        self.orbit_timer.setInterval(50)
+        self.orbit_timer.timeout.connect(self._orbit_tick)
 
         # No animation loop: the scene is drawn when something changes, so an idle exhibit costs no GPU.
         # (The timer is kept, stopped, for tools that expect it.)
@@ -405,7 +417,14 @@ class MonitorWindow(QMainWindow):
         for name, actor in self.txt_terms.items():
             actor.SetInput("■  " + TERM_LABELS[name])
         self.txt_hint.SetInput(self._hint_text(False))
-        for actor in (self.txt_title, self.txt_view, self.txt_hint, *self.txt_terms.values()):
+
+        # Explainer text: a caption for the idle show, and two labels pinned to points on the model
+        self.txt_caption = vtk.vtkTextActor()
+        self.txt_caption.VisibilityOff()
+        self.callouts = [self._make_callout(HIGH_LABEL, "#C2410C", above=True),
+                         self._make_callout(LOW_LABEL, "#1D4ED8", above=False)]
+        pl.renderer.AddObserver("StartEvent", lambda *_: self._reproject_callouts())  # keeps them on their points
+        for actor in (self.txt_title, self.txt_view, self.txt_hint, self.txt_caption, *self.txt_terms.values()):
             actor.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
             pl.renderer.AddViewProp(actor)
 
@@ -413,6 +432,8 @@ class MonitorWindow(QMainWindow):
 
     def _hint_text(self, detailed: bool) -> str:
         """One short line for visitors; the camera keys and the remote address only in the detailed view."""
+        if self._show:
+            return "Show mode    ·    turn the knob or press any button to take over"
         if not detailed:
             return "1–0  smoke height    ·    Knob  wind direction    ·    Tab  view    ·    Space  more detail"
         text = ("Buttons 1–0: smoke wand  ·  Knob: wind direction  ·  Tab: change view  ·  Space: less detail\n"
@@ -441,7 +462,8 @@ class MonitorWindow(QMainWindow):
         self.plotter.reset_camera(bounds=tuple(f))
         # a tall, narrow view (aspect < 1.3) is limited by its width, so zoom in less
         aspect = self.plotter.width() / max(self.plotter.height(), 1)
-        self.plotter.camera.zoom(1.2 * min(1.0, aspect / 1.3))
+        # the idle show draws a caption bar along the bottom, so the picture is a little smaller then
+        self.plotter.camera.zoom(1.2 * min(1.0, aspect / 1.3) * (0.86 if self._show else 1.0))
 
     @staticmethod
     def _tubes(lines: pv.PolyData, radius: float) -> pv.PolyData:
@@ -513,6 +535,9 @@ class MonitorWindow(QMainWindow):
             self._ghost_key = key
             self._update_ghosts(*key)
 
+        # 2c. Explainer labels pinned to the highest and lowest surface pressure of this state
+        self._place_callouts()
+
         # 3. Wind arrow: same shape every time, so its points are updated in place (no new actor, no render).
         self.arrow_poly.copy_from(self._wind_arrow(state["wind_vector"]))
 
@@ -555,6 +580,113 @@ class MonitorWindow(QMainWindow):
             self.lbl_filled.hide()
 
         self.overlay.set_metrics(metrics, state.get("worst_direction_deg"))
+        self.plotter.render()
+
+    def _make_callout(self, text: str, color: str, above: bool) -> dict:
+        """A label with a dot and a leader line, all 2D actors; _reproject_callouts keeps them on a 3D point."""
+        rgb = tuple(v / 255.0 for v in hex_to_rgb(color))
+        label = vtk.vtkTextActor()
+        label.SetInput(text)
+        dot = vtk.vtkTextActor()
+        dot.SetInput("●")
+        line = vtk.vtkPolyData()
+        line.SetPoints(vtk.vtkPoints())
+        line.GetPoints().SetNumberOfPoints(2)
+        cells = vtk.vtkCellArray()
+        cells.InsertNextCell(2)
+        cells.InsertCellPoint(0)
+        cells.InsertCellPoint(1)
+        line.SetLines(cells)
+        mapper = vtk.vtkPolyDataMapper2D()
+        mapper.SetInputData(line)
+        leader = vtk.vtkActor2D()
+        leader.SetMapper(mapper)
+        leader.GetProperty().SetColor(*rgb)
+        leader.GetProperty().SetLineWidth(2.0)
+        for actor in (label, dot, leader):
+            actor.VisibilityOff()
+            self.plotter.renderer.AddViewProp(actor)
+        return {"label": label, "dot": dot, "line": line, "leader": leader, "color": color, "above": above,
+                "point": None, "wanted": False}
+
+    def _place_callouts(self) -> None:
+        """Aim the two labels at the highest-pressure and the lowest-pressure vertex of the model."""
+        cp = np.asarray(self.mesh_poly.point_data[CP_TITLE], dtype=float)
+        if not np.isfinite(cp).any():
+            return
+        pts = np.asarray(self.mesh_poly.points)
+        for c, i in zip(self.callouts, (int(np.nanargmax(cp)), int(np.nanargmin(cp)))):
+            c["point"] = pts[i].copy()
+
+    def _set_callouts_visible(self, on: bool) -> None:
+        for c in self.callouts:
+            c["wanted"] = bool(on)
+            for k in ("label", "dot", "leader"):
+                c[k].SetVisibility(bool(on) and c["point"] is not None)
+
+    def _reproject_callouts(self) -> None:
+        """Before every draw: project each 3D point to the screen, put its dot there and its label an offset away."""
+        r = self.plotter.renderer
+        w, h = r.GetSize()
+        for c in self.callouts:
+            if not c["wanted"] or c["point"] is None:
+                continue
+            r.SetWorldPoint(*c["point"], 1.0)
+            r.WorldToDisplay()
+            x, y, _ = r.GetDisplayPoint()
+            if c["above"]:  # label up and to the left of its point, right-aligned
+                lx, ly = min(max(x - 40, 330), w - 20), min(max(y + 100, 60), h - 120)
+                just = "right"
+            else:  # label down and to the right, left-aligned
+                lx, ly = min(max(x + 40, 20), w - 330), min(max(y - 100, 120), h - 60)
+                just = "left"
+            tp = c["label"].GetTextProperty()
+            tp.SetJustificationToRight() if just == "right" else tp.SetJustificationToLeft()
+            tp.SetVerticalJustificationToBottom() if c["above"] else tp.SetVerticalJustificationToTop()
+            c["label"].SetPosition(lx, ly)
+            dtp = c["dot"].GetTextProperty()
+            dtp.SetJustificationToCentered()
+            dtp.SetVerticalJustificationToCentered()
+            c["dot"].SetPosition(x, y)
+            pts = c["line"].GetPoints()
+            pts.SetPoint(0, x, y, 0.0)
+            pts.SetPoint(1, lx, ly + (-4 if c["above"] else 4), 0.0)
+            pts.Modified()
+            c["line"].Modified()
+
+    def on_show_changed(self, active: bool) -> None:
+        """The idle show started or stopped. It swings the camera slowly; a visitor takes over from a clean view."""
+        self._show = bool(active)
+        self.txt_hint.SetInput(self._hint_text(self.detailed))
+        self.txt_caption.SetVisibility(self._show)
+        if self._show:
+            self._fit_camera()
+            self._orbit_angle, self._orbit_t0 = 0.0, time.monotonic()
+            self.on_show_step(self.controller.show_step)
+            self.orbit_timer.start()
+        else:
+            self.orbit_timer.stop()
+            self._fit_camera()
+        self.plotter.render()
+
+    def on_show_step(self, step: int) -> None:
+        self._show_step = int(step)
+        text = caption_for(self.obj_id, step)
+        # two balanced lines at most: break at the space nearest the middle
+        if len(text) > 56:
+            mid = len(text) // 2
+            cut = min((i for i, ch in enumerate(text) if ch == " "), key=lambda i: abs(i - mid))
+            text = text[:cut] + "\n" + text[cut + 1:]
+        self.txt_caption.SetInput(text)
+        self.plotter.render()
+
+    def _orbit_tick(self) -> None:
+        """Swing the camera about the point it looks at: angle = A sin(2 pi t / T)."""
+        t = time.monotonic() - self._orbit_t0
+        angle = ORBIT_DEGREES * math.sin(2.0 * math.pi * t / ORBIT_SECONDS)
+        self.plotter.camera.Azimuth(angle - self._orbit_angle)
+        self._orbit_angle = angle
+        self.plotter.renderer.ResetCameraClippingRange()
         self.plotter.render()
 
     def _update_ghosts(self, direction_index: int, selected: int) -> None:
@@ -643,6 +775,7 @@ class MonitorWindow(QMainWindow):
         self.bars[K_TITLE].SetVisibility(view == 2)
         for actor in self.txt_terms.values():
             actor.SetVisibility(view == 1)
+        self._set_callouts_visible(view == 0)
 
     def _layout_overlays(self) -> None:
         """Place legends and titles in the graphics window; text sizes follow the window height."""
@@ -652,6 +785,21 @@ class MonitorWindow(QMainWindow):
         self.txt_title.SetVisibility(False)  # one short line is enough: the view name
         _style_text(self.txt_view.GetTextProperty(), max(11, int(0.021 * h)), TEXT, bold=True)
         self.txt_view.SetPosition(0.018, 0.945)
+        cap = self.txt_caption.GetTextProperty()
+        _style_text(cap, max(14, int(0.03 * h)), TEXT, bold=True)
+        cap.SetJustificationToCentered()
+        cap.SetVerticalJustificationToBottom()
+        cap.SetBackgroundColor(1.0, 1.0, 1.0)
+        cap.SetBackgroundOpacity(0.9)
+        cap.SetFrame(False)
+        cap.SetLineSpacing(1.15)
+        self.txt_caption.SetPosition(0.5, 0.075)
+        for c in self.callouts:
+            tp = c["label"].GetTextProperty()
+            _style_text(tp, max(11, int(0.0175 * h)), c["color"], bold=True)
+            tp.SetBackgroundColor(1.0, 1.0, 1.0)
+            tp.SetBackgroundOpacity(0.88)
+            _style_text(c["dot"].GetTextProperty(), max(12, int(0.022 * h)), c["color"])
         _style_text(self.txt_hint.GetTextProperty(), max(9, int(0.0145 * h)), MUTED)
         self.txt_hint.GetTextProperty().SetJustificationToRight()
         self.txt_hint.GetTextProperty().SetVerticalJustificationToBottom()
@@ -716,6 +864,10 @@ class MonitorWindow(QMainWindow):
     def eventFilter(self, obj, event) -> bool:  # noqa: N802 (Qt override)
         """The 3D widget would swallow keys for itself (VTK shortcuts) and the wheel (zoom): route them first."""
         if obj is self.plotter:
+            if event.type() in (QEvent.MouseButtonPress, QEvent.NativeGesture) or (
+                event.type() == QEvent.Wheel and event.modifiers() & (Qt.ControlModifier | Qt.MetaModifier)
+            ):
+                self.controller.touch()  # dragging, pinching and zooming are visitors too
             if event.type() == QEvent.KeyPress and self._route_key(event):
                 return True
             if event.type() == QEvent.Wheel and event.modifiers() & (Qt.ControlModifier | Qt.MetaModifier):

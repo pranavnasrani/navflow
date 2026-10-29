@@ -86,6 +86,7 @@ def main():
     input_ctrl = ExhibitionInputController(
         wand_count=settings.wand_count,
         knob_step=float(config["controls"]["knob_step"]),
+        idle_seconds=float(config["controls"].get("idle_seconds", 25)),  # 0 turns the idle show off
     )
 
     # iPad remote: a tiny HTTP server so a tablet on the same Wi-Fi / hotspot drives the same
@@ -155,6 +156,8 @@ def main():
     else:
         print("  - iPad remote     : off")
     print("========================================================\n")
+
+    input_ctrl.start_clock()  # the idle show starts now and comes back whenever the exhibit is left alone
 
     sys.exit(app.exec())
 

@@ -305,3 +305,55 @@ def test_navier_stokes_divergence():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+# ---- idle show ---------------------------------------------------------------------------------------
+def test_show_steps_have_a_caption_for_every_object():
+    from app.explainers import CAPTIONS, SHOW_STEPS, caption_for, smoothstep
+
+    for obj, texts in CAPTIONS.items():
+        assert len(texts) == len(SHOW_STEPS), obj
+        assert all(t.strip() for t in texts)
+    assert caption_for("f1_car", len(SHOW_STEPS)) == caption_for("f1_car", 0)  # wraps round
+    assert smoothstep(0.0) == 0.0 and smoothstep(1.0) == 1.0 and abs(smoothstep(0.5) - 0.5) < 1e-12
+
+
+def test_show_starts_when_idle_and_a_visitor_stops_it():
+    from app.explainers import SHOW_STEPS
+
+    ctrl = ExhibitionInputController(idle_seconds=10.0)
+    seen = []
+    ctrl.show_changed.connect(seen.append)
+
+    ctrl._last_input -= 11.0  # nobody has touched anything for 11 s
+    ctrl._tick()
+    assert ctrl.show_active and seen == [True]
+    assert ctrl.current_wand_index == SHOW_STEPS[0].wand  # the show moved the wand, and that did not stop it
+
+    ctrl.set_wand(2)  # a visitor presses button 3
+    assert not ctrl.show_active and seen == [True, False]
+    assert ctrl.current_wand_index == 2
+
+    ctrl._tick()  # touched just now: the show does not come straight back
+    assert not ctrl.show_active
+
+
+def test_show_moves_the_knob_in_a_smooth_line_and_loops():
+    from app.explainers import SHOW_STEPS
+
+    ctrl = ExhibitionInputController(idle_seconds=10.0)
+    ctrl.start_show()
+    ctrl._enter_step(2)  # knob heads from 0 to 0.5
+    ctrl._step_started -= SHOW_STEPS[2].seconds / 2.0  # halfway through the step
+    ctrl._tick()
+    assert abs(ctrl.current_knob - 0.25) < 0.02  # smoothstep(0.5) = 0.5, so halfway along the line
+    ctrl._enter_step(len(SHOW_STEPS) - 1)
+    ctrl._enter_step(ctrl.show_step + 1)
+    assert ctrl.show_step == 0  # after the last step it starts again
+
+
+def test_show_is_off_when_idle_seconds_is_zero():
+    ctrl = ExhibitionInputController(idle_seconds=0.0)
+    ctrl._last_input -= 1000.0
+    ctrl._tick()
+    assert not ctrl.show_active

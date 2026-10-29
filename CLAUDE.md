@@ -147,6 +147,7 @@ navflow/
    - Wind-direction knob, clockwise (next direction): `Right`, `D`, `+`, `=`, `]`. Anticlockwise: `Left`, `A`, `-`, `_`, `[`. The mouse wheel also turns it (one notch = one detent of `knob_step`).
    - `Tab`: cycle view. `Space`: simple / detailed instrument strip (starts simple). `R`: reset every camera.
    - Camera: drag to turn; trackpad pinch or Cmd + scroll to zoom (plain scroll stays the knob). There is no key to quit.
+   - **Idle show** (`app/explainers.py`, `ExhibitionInputController`): after `controls.idle_seconds` (default 25, 0 = off) without input, and at start-up, a six-step show runs on all screens: the knob eases between positions (smoothstep), the wand and view change, the camera swings +-22 degrees, and each object shows a plain-English caption per step. Labels pinned to the highest and lowest surface pressure show in view 1. Any key, wheel, drag, pinch, macropad or iPad input stops it. Every number in a caption must come from the solved results.
    - Smoke shows at all 10 wand heights: the selected height bright, the other nine faint (`ObjectStateManager.wand_lines`).
 
 5. **Linear interpolation (0606)**:
