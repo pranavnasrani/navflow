@@ -14,11 +14,18 @@ fi
 
 PYTHON="./.venv/bin/python3"
 
-MODE="${1:---dev-mode}"
+# Usage: ./run_exhibition.sh [--dev-mode | --monitor-mode] [--objects <id> ...] [--screens N ...]
+#                            [--follow <host-ip>[:port]] [--no-remote] ...
+#   Two computers: run the host with its --objects, then on the other Mac the remaining --objects plus --follow <host-ip>.
+# Needs the OpenFOAM results in assets/cache/ (python solver/import_results.py); extra flags go to app/main.py.
+if [ "$#" -eq 0 ]; then
+    set -- --dev-mode
+fi
+MODE="$*"
 
 echo "=========================================================="
 echo " Starting Navier-Stokes CFD Interactive Exhibition App"
 echo " Mode: $MODE"
 echo "=========================================================="
 
-"$PYTHON" app/main.py "$MODE"
+"$PYTHON" app/main.py "$@"

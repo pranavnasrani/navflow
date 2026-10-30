@@ -1,6 +1,6 @@
 # CLAUDE.md — Agent & Developer Guide
 
-This repository contains an interactive, native 4-monitor 3D Computational Fluid Dynamics (CFD) simulation system for the **Math section of a STEM Exhibition**. It demonstrates the power of the **Navier-Stokes equations** applied to aerodynamics and sustainability.
+This repository contains an interactive, native 3-monitor 3D Computational Fluid Dynamics (CFD) simulation system for the **Math section of a STEM Exhibition**. It demonstrates the power of the **Navier-Stokes equations** applied to aerodynamics and sustainability.
 
 ---
 
@@ -10,101 +10,139 @@ This repository contains an interactive, native 4-monitor 3D Computational Fluid
    - Demonstrates the **3D Incompressible Navier-Stokes Equations**:
      $$\nabla \cdot \mathbf{v} = 0 \quad \text{(Mass Conservation)}$$
      $$\rho \left(\frac{\partial \mathbf{v}}{\partial t} + (\mathbf{v} \cdot \nabla)\mathbf{v}\right) = -\nabla p + \mu \nabla^2 \mathbf{v} \quad \text{(Newton's 2nd Law for Fluids)}$$
-   - Explained and documented using **IGCSE Additional Mathematics (0606)** concepts: 3D velocity vectors, rates of change & connected rates of change (chain rule), small increments ($\delta u / \delta x$), second derivatives for viscosity/friction, circle coordinate geometry for the pipe nozzle, and linear interpolation for the velocity knob.
+   - Explained and documented using **IGCSE Additional Mathematics (0606)** concepts: 3D velocity vectors, rates of change & connected rates of change (chain rule), small increments ($\delta u / \delta x$), second derivatives for viscosity/friction, coordinate geometry for the smoke-wand rake, and linear interpolation for the wind-direction knob.
 
 2. **The Sustainability Link**:
    - **Aerospace (Monitor 1 - Airplane)**: Lift-to-drag ratio optimization, reducing induced drag and jet fuel / $\text{CO}_2$ emissions per flight hour.
    - **Motorsport & Automotive (Monitor 2 - F1 Car)**: Cutting frontal surface area ($A_{\text{front}}$) and managing ground effect downforce to slash the cubic aerodynamic drag power:
      $$P_{\text{drag}} = F_{\text{drag}} \cdot V = \frac{1}{2} \rho C_d A_{\text{front}} V^3$$
    - **Sustainable Architecture (Monitor 3 - Skyscraper)**: High-altitude wind loading, mitigating vortex shedding, and reducing structural material and HVAC wind infiltration.
-   - **Benchmark Bluff Body (Monitor 4 - Human)**: Shows severe flow separation, massive turbulent wake eddies, and high drag of unstreamlined shapes compared to engineered geometries.
+   - ~~Benchmark Bluff Body (Human)~~: dropped from the exhibit; its results are still in the caches.
 
 3. **Interactive Hardware Setup**:
-   - **4 Independent Monitors**: One monitor window per object.
-   - **1 USB HID Macropad**: Configured as a USB keyboard sending keystrokes that control all 4 monitors simultaneously:
-     - **10 Buttons**: Discrete Z-height steps (1 through 10) moving a circular water-pipe inlet nozzle vertically.
-     - **1 Rotary Knob**: Wind velocity adjustment across 10–50 m/s with continuous 0606 linear interpolation.
+   - **3 Independent Monitors**: One monitor window per object (airplane, F1 car, skyscraper). The human bluff body was dropped from the exhibit on 2026-10-30: it is still solved and cached, and `"display": false` on its entry in `config/exhibition_config.json` keeps it off the screens (flip it to bring it back).
+   - **1 USB HID Macropad** (keyboard keystrokes) controlling all 3 monitors at once, plus an **iPad remote** (touch page served by the app over local HTTP; the display itself stays native):
+     - **10 Buttons**: the **smoke wand** height (10 steps), a rake of streamline seeds you move through the flow.
+     - **1 Rotary Knob**: **wind direction** across 9 solved directions per object, blended by 0606 linear interpolation. The direction is a different quantity per object (airplane = angle of attack, F1 car = crosswind yaw, building = wind bearing, human = body angle).
+     - **Tab**: cycle the view (surface pressure / dominant Navier-Stokes term / turbulence k).
+   - Each object runs at **one fixed speed** (airplane 102 m/s, F1 car 40, building 50 at roof height, human 10).
 
 4. **Zero-Latency Architecture (<1 ms switching)**:
-   - Live 3D CFD solving is too slow for 60fps joystick feedback.
-   - We **pre-compute all 50 states per object** (10 Z-heights × 5 wind speeds = 50 states, 200 states total) and package them into compact `.npz` files in `assets/cache/`.
-   - At runtime, `app/state_manager.py` loads the states into RAM. Pressing any button or turning the knob updates all 4 screens in **under 0.4 milliseconds**!
+   - Results come from real **OpenFOAM** (simpleFoam, k-omega SST) runs, not from a live solver. Each object is solved for 9 directions; all 10 wand heights per direction are streamlines traced from that one solution.
+   - `solver/import_results.py` packs each object into `assets/cache/<object>_states.npz` (cache format v2).
+   - At runtime `app/state_manager.py` loads the cache into RAM. The state lookup (wand, knob or iPad input -> the numbers, pressure and streamlines to draw) takes **under 1 ms**; drawing the frame is separate.
 
 ---
 
 ## 🛠️ Environment & Development Commands
 
 ### Python Environment
-- Python version: **3.12+**
-- Virtual environment: `.venv/`
-- Dependencies in `requirements.txt`: `PySide6`, `pyvista`, `pyvistaqt`, `vtk`, `trimesh`, `rtree`, `numpy`, `scipy`, `matplotlib`.
+- Python **3.12+**, virtual environment `.venv/`, dependencies in `requirements.txt` (`PySide6`, `pyvista`, `pyvistaqt`, `vtk`, `trimesh`, `rtree`, `numpy`, `scipy`, `matplotlib`).
+- OpenFOAM runs need **Docker** (image `opencfd/openfoam-default:2512`, volume `navflow-cases`, 4 MPI processes): Docker Desktop on the laptop, **Colima** on the Mac mini (8 CPU / 12 GB; after a reboot run `colima start` there). The app itself does not need Docker.
+- Model conversion needs **Blender** (`brew install --cask blender`) for .blend/.fbx/.glb files.
 
 ### Common Commands
 
 ```bash
-# Run the integration test suite (verifies <1ms RAM lookup, 0606 linear interpolation, solver divergence)
-./.venv/bin/python3 tests/test_system.py
+# Tests (the suite is expected to pass without Docker; tests marked `docker` need Docker Desktop)
+./.venv/bin/python -m pytest -q -m "not docker"
 
-# Launch development mode (arranges all 4 monitor windows in a 2x2 grid on current screen)
-./run_exhibition.sh
-# or:
-./.venv/bin/python3 app/main.py --dev-mode
-
-# Launch production exhibition mode (spans 4 fullscreen windows across 4 physical monitors)
+# Launch (dev: windows tiled on this screen; --monitor-mode: one fullscreen window per monitor)
+./run_exhibition.sh                      # = app/main.py --dev-mode
 ./run_exhibition.sh --monitor-mode
-# or:
-./.venv/bin/python3 app/main.py --monitor-mode
+./.venv/bin/python app/main.py --object airplane   # airplane | f1_car | building | human
+./.venv/bin/python app/main.py --no-remote         # skip the iPad remote (and the second-computer link)
+./.venv/bin/python app/main.py --theme dark         # start in the dark theme (T key or the iPad's moon button switches all screens)
+./.venv/bin/python app/main.py --orbit 90          # seconds per camera circle round each model (default 60, 0 = hold still)
+./run_exhibition.sh --ngrok                        # also put the iPad remote on the internet (ngrok); --ngrok NAME.ngrok-free.app for your reserved domain
 
-# Launch focused single-object window
-./.venv/bin/python3 app/main.py --object airplane   # Options: airplane, f1_car, building, human
+# Two computers: the host owns the macropad, the iPad page and the idle show; the follower mirrors it.
+./run_exhibition.sh --monitor-mode --objects airplane f1_car                  # host: monitors 1 and 2
+./run_exhibition.sh --monitor-mode --objects building --follow 192.168.1.20   # other Mac: monitor 1
+#   --objects picks the windows this computer opens; --screens 2 1 sends them to monitors 2 and 1 (1 = first);
+#   --follow HOST[:PORT] makes this computer the follower. The host prints the follow command with its own IP.
 
-# Regenerate starter 3D models (.stl)
-./.venv/bin/python3 assets/generate_starter_models.py
+# 1. Prepare a downloaded model (STL/OBJ/PLY, or GLB/GLTF/BLEND/FBX via headless Blender) -> assets/models/<id>/model.stl + preview.png
+#    --wrap RES shrink-wraps display models made of open parts (cube = longest side / RES); --drop skips Blender objects by name prefix.
+#    Current models: airplane --wrap 500 --drop gears, f1_car --wrap 500, building --wrap 400 (sources in assets/models/incoming/, git-ignored).
+#    Check preview.png: nose faces the wind (+x), up is up.
+./.venv/bin/python solver/prepare_model.py --object airplane --src ~/Downloads/plane.glb
 
-# Precompute CFD states (full 50 states x 4 objects)
-./.venv/bin/python3 solver/batch_precompute.py
+# 2. Run OpenFOAM (resumable; Ctrl-C or `stop` saves and exits; same command resumes)
+./.venv/bin/python solver/run_openfoam.py test --object airplane --direction-index 0 --iterations 60 --coarse   # pipeline check
+./.venv/bin/python solver/run_openfoam.py run --objects airplane f1_car building human --preview   # 3 directions, cap 500, runs/preview
+./.venv/bin/python solver/run_openfoam.py run --objects airplane f1_car building human             # all 9 directions, cap 1000, runs/full
+./.venv/bin/python solver/run_openfoam.py run --objects airplane --retry-failed   # failed runs are skipped until reset to waiting
+./.venv/bin/python solver/run_openfoam.py status [--machine mini]   # one row per run (all machines unless --machine)
+./.venv/bin/python solver/run_openfoam.py stop       # ask the running batch to save and stop
 
-# Quick precomputation test (3 heights x 2 speeds)
-./.venv/bin/python3 solver/batch_precompute.py --quick
+# 3. Import finished runs into the display caches (safe to re-run as more runs finish;
+#    directions not yet run are filled from the nearest finished one, and the report says which)
+./.venv/bin/python solver/import_results.py [--root runs/full] [--objects airplane] [--out-dir assets/cache]
 ```
+
+### iPad remote
+`app/main.py` serves a touch page on `controls.remote_port` (8765) and prints the URL (`http://<lan-ip>:8765/`) in the terminal and on each window. Open it in Safari on any device on the same Wi-Fi or phone hotspot. If the port is busy the app prints a warning and runs without the remote. The server lives in `app/remote_server.py`; the page is the single file `app/remote/index.html`.
+
+### iPad remote as an app (PWA) and ngrok
+The remote page is installable: `app/remote/manifest.webmanifest` (display `standalone`), `icon-180/192/512.png` (drawn by `scripts/make_remote_icons.py`) and the `apple-*` meta tags in `index.html`, all served by `app/remote_server.py`. Opened from the Home Screen it has no Safari tab bar. To install: open the remote's address in **Safari** on the iPad, Share, **Add to Home Screen**.
+`--ngrok [DOMAIN]` (`app/tunnel.py`) runs `ngrok http <remote_port>` and prints the public https address, for networks where devices cannot see each other. One-time setup: `brew install ngrok` (done on this Mac), then `ngrok config add-authtoken <token>` with the token from dashboard.ngrok.com. A free **reserved domain** (dashboard, Domains) keeps the address the same every day, so the Home Screen icon keeps working; without one the address changes each run and the icon must be re-added. ngrok's free tier may show a one-time notice page on first open (tap Visit Site). Anyone with the address can use the controls, so keep it private.
+
+### Showing on two computers
+One process per computer, same code and same `assets/cache/` on both (`scripts/sync_to_mini.sh` copies the project). The **host** (no `--follow`) opens its `--objects` windows and also owns every control: macropad, iPad page (port 8765), idle show. The **follower** (`--follow <host-ip>`) opens the other objects and mirrors the host: `app/follower.py` polls `GET /sync` about 25 times a second and applies it with `ExhibitionInputController.apply_sync`, so the windows move together. Keys, wheel and drags on the follower are sent to the host (`POST /cmd`), so a keyboard on either Mac works; a macropad should be plugged into the host. If the host stops, follower windows keep their last picture and keep retrying. Both computers must be on the same network; the iPad page is opened at the host's URL. Start the host first (the follower retries anyway).
+
+### Two machines for OpenFOAM runs (laptop + Mac mini)
+Each machine keeps its own queue file `runs/full/queue_<machine>.json`, chosen with `--machine` (default `laptop`). **On the mini always pass `--machine mini`** (for `run`, `stop` and `status`), e.g. `run_openfoam.py run --objects building human --machine mini`; `pull_from_mini.sh` also refuses to copy `queue_laptop.json`, so the laptop's queue is never overwritten.
+```bash
+./scripts/sync_to_mini.sh     # rsync the project to $MINI_HOST (default the mini's Tailscale IP 100.114.120.115), excluding .venv, runs, .git
+./scripts/pull_from_mini.sh   # rsync the mini's runs/full/ back into runs/full/, then run import_results.py
+```
+
+### Old exhibit
+The previous design (homemade finite-difference solver, pipe nozzle, wind-speed knob, 50 states per object) is preserved at the git tag **`v1-fallback`**: `git checkout v1-fallback`. The current app refuses to start on a v1 cache and prints this hint.
 
 ---
 
 ## 📁 Repository Structure
 
 ```text
-Exhibition/
-├── CLAUDE.md                       # This guide for Claude Code and coding agents
+navflow/
+├── CLAUDE.md                       # This guide
 ├── README.md                       # General project documentation & math guide
-├── run_exhibition.sh               # Convenience launch script
-├── requirements.txt                # Python dependencies
+├── run_exhibition.sh               # Launch script (passes flags through to app/main.py)
+├── requirements.txt
+├── pytest.ini
 ├── config/
-│   └── exhibition_config.json      # Master config: wind tunnel geometry, objects, keys, solver settings
+│   └── exhibition_config.json      # openfoam settings, per-object cfd blocks, controls (remote_port, knob_step)
 ├── assets/
-│   ├── generate_starter_models.py  # Procedural watertight meshes (airplane, f1_car, building, human)
-│   ├── models/                     # Custom .stl / .obj models can be dropped here
-│   │   ├── airplane/model.stl
-│   │   ├── f1_car/model.stl
-│   │   ├── building/model.stl
-│   │   └── human/model.stl
-│   └── cache/                      # Precomputed .npz archives (450KB each, loaded into RAM)
-│       ├── airplane_states.npz
-│       ├── f1_car_states.npz
-│       ├── building_states.npz
-│       └── human_states.npz
+│   ├── generate_starter_models.py  # Procedural placeholder meshes
+│   ├── models/<id>/model.stl       # Prepared, tunnel-ready models (+ preview.png)
+│   └── cache/<id>_states.npz       # Format-v2 result caches loaded into RAM
+├── scripts/
+│   ├── sync_to_mini.sh             # rsync project -> Mac mini
+│   └── pull_from_mini.sh           # rsync runs/full from the Mac mini
 ├── solver/
-│   ├── navier_stokes_3d.py         # From-scratch 3D Chorin Projection finite-difference solver
-│   ├── mesh_voxelizer.py           # Voxelizes .stl/.obj meshes & extracts surface normals
-│   ├── batch_precompute.py         # Solves parameter grid and generates .npz bundles
-│   ├── vtk_importer.py             # Imports ANSYS Fluent & OpenFOAM .vtk/.vtu exports
-│   └── openfoam_bridge.py          # Docker runner for OpenFOAM cases
+│   ├── prepare_model.py            # Model -> closed, scaled, oriented STL + preview (--wrap, Blender import)
+│   ├── blender_export.py           # Run inside headless Blender: .blend/.fbx/.glb -> one joined STL
+│   ├── run_openfoam.py             # CLI: run / stop / status / test
+│   ├── import_results.py           # CLI: finished runs -> assets/cache/*.npz
+│   ├── navier_stokes_3d.py         # Small from-scratch Chorin solver, kept for teaching and its test
+│   └── foam/                       # settings, geometry, case_writer (+templates/), convergence, queue,
+│                                   # runner, importer, ns_terms, sustainability
 ├── app/
-│   ├── main.py                     # Master Qt application launcher
-│   ├── state_manager.py            # Zero-latency RAM cache manager & linear interpolation
-│   ├── monitor_window.py           # Native PySide6 + PyVista 3D window & dark-mode HUD
-│   └── input_controller.py         # Global USB HID Macropad & keyboard event dispatcher
-└── tests/
-    └── test_system.py              # Automated test suite
+│   ├── main.py                     # Qt launcher (checks caches, starts the iPad remote)
+│   ├── cache_format.py             # Cache format v2 read/write
+│   ├── state_manager.py            # RAM cache + linear interpolation
+│   ├── input_controller.py         # Keyboard / macropad -> (wand, knob, view) state
+│   ├── remote_server.py            # iPad remote HTTP server (+ /sync for a second computer); app/remote/index.html is the page
+│   ├── follower.py                 # --follow: mirrors a host computer's controller, forwards local input to it
+│   ├── monitor_window.py           # Native PySide6 + PyVista window: top bar with a tab per view, 3D flow, sidebar with the N-S terms
+│   ├── theme.py                    # Light and dark colour themes (window, sidebar, term colours, model grey)
+│   ├── tunnel.py                   # --ngrok: public https address for the iPad remote
+│   ├── math_render.py              # Typeset maths (matplotlib mathtext, STIX) as pictures for the sidebar
+│   └── hud_widgets.py              # HUD building blocks
+├── tests/                          # pytest suite
+└── runs/                           # OpenFOAM case results (git-ignored): preview/, full/, test/
 ```
 
 ---
@@ -112,28 +150,30 @@ Exhibition/
 ## 🧩 Key Architecture Details & Agent Guidelines
 
 1. **Strict Native Requirement**:
-   - The user has explicitly specified this must be a **100% native desktop application** (PySide6 + PyVista / VTK with Metal/OpenGL). Do **NOT** replace with or convert into a web app.
+   - The display is a **100% native desktop application** (PySide6 + PyVista / VTK with Metal/OpenGL). Do **NOT** replace it with or convert it into a web app. The iPad page is only a remote control.
 
-2. **Custom 3D Models**:
-   - The system is completely model-agnostic. Anyone can drop new `.stl` or `.obj` files into `assets/models/<object_id>/model.stl`.
-   - `solver/mesh_voxelizer.py` automatically normalizes, scales, and centers incoming meshes inside the wind tunnel test box $[0.6, 1.4] \times [0.2, 0.8] \times [0.1, 0.9]$.
-   - After updating models, re-run `./.venv/bin/python3 solver/batch_precompute.py`.
+2. **Models and directions**:
+   - Models are prepared with `solver/prepare_model.py` (base rotation, scale and placement are applied once, when it writes `model.stl`; everything that reloads that file uses `geometry.load_prepared`, which does not rotate again). The model is then **rotated and re-meshed for every direction**; the tunnel stays axis-aligned with wind along +x. Per-object speed, real size, direction list, floor type and widgets are in `config/exhibition_config.json`.
+   - Fuel/CO2: each object is compared with its own worst solved direction ("saved"), except the airplane, which has a cruise `mass_kg`: level flight means drag = W / (L/D), and it is compared with its best-L/D angle ("extra"). The airplane also meshes two levels finer (`surface_refinement` [6, 7], ~1.9 M cells).
+   - Air is sea-level for all runs (rho = 1.225 kg/m^3, nu = 1.5e-5 m^2/s). Convergence: stop when drag and lift each change by <0.2% over the last 50 iterations (min 200, cap 1000); a run that hits the cap exports 100-iteration fieldAverage fields and is marked `flagged`.
 
-3. **ANSYS Fluent & OpenFOAM Workflow**:
-   - If importing ANSYS Fluent simulations from another computer: export as standard `.vtk` or `.vtu` containing `Velocity` (or `U`) and `Pressure` (or `p`), and run `solver/vtk_importer.py`.
-   - If using OpenFOAM: `solver/openfoam_bridge.py` automates `blockMesh`, `simpleFoam`, and `foamToVTK` inside Docker.
+3. **Cache format v2** (`app/cache_format.py`, `assets/cache/<obj>_states.npz`):
+   - One file per object, `format_version = 2`. 9 direction states `d0..d8`, each with surface pressure, Navier-Stokes terms, metrics, and 10 wand streamline sets `d<i>_w<j>_*` (lines, turbulent k, dominant term). The model mesh is stored once in its own frame.
+   - v1 caches (keys `z_steps`, `wind_speeds`) are rejected by `read_cache`; `app/main.py` prints the hint and exits 1.
 
-4. **Input Handling & Keybindings**:
-   - Defined in `config/exhibition_config.json` and handled by `app/input_controller.py`.
-   - Number keys `1`–`9`, `0`: Direct Z-step jumps (1 to 10).
-   - `Up` / `Down` or `W` / `S`: Step Z-height up/down.
-   - `Right` / `Left` or `+` / `-` or Mouse Wheel: Turn velocity knob.
+4. **Input handling & keybindings** (hard-coded in `app/input_controller.py`; only `controls.remote_port` and `controls.knob_step` come from `config/exhibition_config.json`):
+   - `1`-`9`, `0`: smoke wand to height 1 to 10.
+   - `Up` / `Down` or `W` / `S`: step the wand up/down.
+   - Wind-direction knob, clockwise (next direction): `Right`, `D`, `+`, `=`, `]`. Anticlockwise: `Left`, `A`, `-`, `_`, `[`. The mouse wheel also turns it (one notch = one detent of `knob_step`).
+   - `Tab` (or clicking a tab in the top bar, or the iPad): cycle the view. `R`: reset every camera. `T`: light / dark theme on every screen (`app/theme.py`). `Space` is still read by the controller but no screen uses it any more.
+   - Camera: drag to turn; trackpad pinch or Cmd + scroll to zoom (plain scroll stays the knob). There is no key to quit.
+   - **Screen layout** (`MonitorWindow`, decided 2026-10-30): a top bar (object name + one tab per view: Velocity & pressure, Navier-Stokes, Turbulence) and a right sidebar with the three terms of the momentum equation. **No explanatory text anywhere on the screen**: no captions, callouts, challenge, hints, forces or sustainability lines. The sidebar is the equation typeset in its per-unit-mass form `(v·∇)v = −(1/ρ)∇p + ν_eff ∇²v` (the form the m/s² values belong to; `solver/foam/ns_terms.py`), then one row per term: symbol, current size, log-scale bar. The row of the largest term is tinted. Term colours are the streamline colours of view 2. `MissionPanel`, `SustainabilityOverlay`, `MISSIONS` and the captions in `app/explainers.py` are still in the repo (tested) but no window uses them.
+   - **Camera orbit**: every camera circles its model all the time (`MonitorWindow._orbit_tick`: a turntable about the upright axis, 60 s per turn, fixed ~10 degree pitch, ~30 frames a second). A mouse or touch drag, pinch or zoom holds it still for 8 s. `--orbit 0` turns it off. The windows are no longer idle for the GPU: check the load on the exhibit Macs.
+   - **Idle show** (`app/explainers.py`, `ExhibitionInputController`): after `controls.idle_seconds` (default 25, 0 = off) without input, and at start-up, a six-step show runs on all screens: the knob eases between positions (smoothstep), the wand and view change (the tabs follow). Any key, wheel, drag, pinch, macropad or iPad input stops it.
+   - Smoke shows at all 10 wand heights: the selected height bright, the other nine faint (`ObjectStateManager.wand_lines`).
 
-5. **Linear Interpolation Formula (0606)**:
-   - When the knob is rotated to a speed $V$ between discrete precomputed speeds $V_1$ and $V_2$, `app/state_manager.py` computes:
-     $$t = \frac{V - V_1}{V_2 - V_1} \in [0, 1]$$
-     $$\mathbf{y}_{\text{live}} = (1 - t)\mathbf{y}_1 + t\mathbf{y}_2$$
-   - This smoothly blends surface pressures, forces, fuel consumption, and telemetry in real time.
+5. **Linear interpolation (0606)**:
+   - The knob maps to a direction by a straight line, d = d_min + knob (d_max - d_min). Between solved directions d1 < d < d2, `app/state_manager.py` computes t = (d - d1)/(d2 - d1) and y = (1 - t) y1 + t y2, blending surface pressure, N-S terms and telemetry live.
 
 6. **Preserving Documentation & Pedagogical Integrity**:
-   - When modifying solver or app code, preserve comments explaining how the code maps to IGCSE 0606 calculus and kinematics so students can explain every line to exhibition judges.
+   - When modifying solver or app code, preserve and extend comments explaining how the code maps to IGCSE 0606 maths (linear interpolation, V^2 and V^3 scaling, cube roots, the chain rule, interval bisection for the run order) so students can explain every line to exhibition judges.

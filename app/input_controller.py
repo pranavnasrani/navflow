@@ -1,96 +1,347 @@
 """
 Global Input Controller for the USB HID Macropad and Keyboard.
-Maintains synchronized (Z_index, Wind_Speed) state across all 4 exhibition windows.
+Maintains one synchronized (wand_index, knob, view) state across all 4 exhibition windows.
+
+  * 10 macropad buttons pick the smoke-wand height (wand index 0..9).
+  * The rotary knob sweeps the wind direction: knob in [0, 1], where the state manager maps
+    it to d = d_min + knob * (d_max - d_min)  (IGCSE 0606 linear interpolation).
+  * Tab cycles the view mode 0 -> 1 -> 2 -> 0.
+  * Space switches every screen between the simple and the detailed instrument strip.
+  * R puts every camera back to its starting view (after visitors have dragged or zoomed it).
+  * T switches every screen between the light and the dark theme.
+  * When nobody has touched anything for `idle_seconds`, a show runs by itself (app/explainers.py): the
+    knob, the wand and the view move on their own and each screen explains what it is showing. The first
+    touch from a visitor, the macropad or the iPad stops it.
+
+Two Macs: the Mac that owns the macropad, the iPad page and the idle show is the HOST. A second Mac runs
+`--follow <host>` and its controller is a FOLLOWER (`forward` is set): its own keys and wheel are sent to the
+host instead of changing local state, and the host's snapshot() comes back through apply_sync(), which
+updates this controller and emits the same signals, so its windows move in step with the host's.
 """
 
-from typing import Callable
-from PySide6.QtCore import QObject, Signal, Qt
+import time
+
+from PySide6.QtCore import QObject, QTimer, Signal, Qt
 from PySide6.QtGui import QKeyEvent, QWheelEvent
+
+from app.explainers import SHOW_STEPS, smoothstep
+
+VIEW_COUNT = 3
+IDLE_SECONDS = 25.0
+SHOW_TICK_MS = 66  # about 15 updates a second while the show moves the knob
 
 
 class ExhibitionInputController(QObject):
     # Signals emitted whenever visitor changes inputs
-    state_changed = Signal(int, float)  # (z_step_index, wind_speed)
+    state_changed = Signal(int, float)  # (wand_index, knob)
+    view_changed = Signal(int)          # view mode
+    detail_changed = Signal(bool)       # True = detailed instrument strip, False = simple
+    camera_reset = Signal()             # every window returns to its starting camera
+    theme_changed = Signal(str)         # "light" or "dark"
+    show_changed = Signal(bool)         # True while the idle show runs
+    show_step_changed = Signal(int)     # which of the show's steps is playing
 
-    def __init__(self,
-                 total_z_steps: int = 10,
-                 min_speed: float = 10.0,
-                 max_speed: float = 50.0,
-                 speed_step: float = 2.5,
-                 controls_cfg: dict = None):
+    def __init__(self, wand_count: int = 10, knob_step: float = 1 / 32, idle_seconds: float = IDLE_SECONDS):
         super().__init__()
-        self.total_z_steps = total_z_steps
-        self.min_speed = min_speed
-        self.max_speed = max_speed
-        self.speed_step = speed_step
-        self.controls_cfg = controls_cfg or {}
+        self.wand_count = wand_count
+        self.knob_step = knob_step
+        self.idle_seconds = idle_seconds  # 0 turns the show off
 
-        # Default initial state: middle Z-step and moderate wind speed
-        self.current_z_index = total_z_steps // 2
-        self.current_wind_speed = (min_speed + max_speed) / 2.0
+        # Default initial state: a mid-height wand, knob fully anticlockwise (first direction),
+        # and the simple strip, since most visitors walk up cold.
+        self.current_wand_index = 4
+        self.current_knob = 0.0
+        self.current_view = 0
+        self.detailed = False
+        self.reset_count = 0  # counts camera resets, so a follower can tell a new one happened
+        self.theme = "light"
 
-    def set_z_step(self, z_idx: int):
-        """Sets the active Z-step index (0..total_z_steps-1)."""
-        new_idx = max(0, min(self.total_z_steps - 1, z_idx))
-        if new_idx != self.current_z_index:
-            self.current_z_index = new_idx
-            self.state_changed.emit(self.current_z_index, self.current_wind_speed)
+        # Follower mode: set to a callable(kind, value) that sends the input to the host Mac.
+        self.forward = None
 
-    def step_z(self, delta: int):
-        """Moves Z-step up (+1) or down (-1)."""
-        self.set_z_step(self.current_z_index + delta)
+        # The idle show. `_driving` is True while the show itself moves a control, so that is not mistaken
+        # for a visitor touching it.
+        self.show_active = False
+        self.show_step = 0
+        self._driving = False
+        self._last_input = time.monotonic()
+        self._step_started = 0.0
+        self._knob_from = 0.0
+        self._clock = QTimer(self)
+        self._clock.setInterval(SHOW_TICK_MS)
+        self._clock.timeout.connect(self._tick)
 
-    def set_wind_speed(self, speed: float):
-        """Sets continuous wind speed in m/s."""
-        new_speed = max(self.min_speed, min(self.max_speed, speed))
-        if abs(new_speed - self.current_wind_speed) > 1e-4:
-            self.current_wind_speed = new_speed
-            self.state_changed.emit(self.current_z_index, self.current_wind_speed)
+    # ----------------------------------------------------------------------------------------------
+    # Idle show
+    # ----------------------------------------------------------------------------------------------
+    def start_clock(self, start_show: bool = True):
+        """Begin watching for idleness (call once the windows exist). `start_show` runs the show at once.
+        A follower never runs its own show: it shows whatever the host is doing."""
+        if self.forward is not None:
+            return
+        self._last_input = time.monotonic()
+        self._clock.start()
+        if start_show and self.idle_seconds > 0:
+            self.start_show()
 
-    def step_wind_speed(self, delta_m_s: float):
-        """Adjusts wind speed (e.g. from rotary knob twist)."""
-        self.set_wind_speed(self.current_wind_speed + delta_m_s)
+    def _human(self):
+        """Something other than the show touched a control: restart the idle count and stop the show."""
+        if self.forward is not None:
+            self.forward("touch", 0)  # a follower has no show of its own; tell the host a visitor is here
+            return
+        if self._driving:
+            return
+        self._last_input = time.monotonic()
+        if self.show_active:
+            self.stop_show()
+
+    def touch(self):
+        """Windows call this for mouse drags, pinches and Cmd + scroll: they are visitors too."""
+        self._human()
+
+    def start_show(self):
+        if self.show_active:
+            return
+        self.show_active = True
+        self._driving = True
+        if self.detailed:
+            self.toggle_detail()  # the show runs in the simple view
+        self._driving = False
+        self.show_changed.emit(True)
+        self._enter_step(0)
+
+    def stop_show(self):
+        if not self.show_active:
+            return
+        self.show_active = False
+        self.show_changed.emit(False)
+
+    def _enter_step(self, index: int):
+        self.show_step = index % len(SHOW_STEPS)
+        step = SHOW_STEPS[self.show_step]
+        self._step_started = time.monotonic()
+        self._knob_from = self.current_knob
+        self._driving = True
+        self.set_wand(step.wand)
+        self.set_view(step.view)
+        self._driving = False
+        self.show_step_changed.emit(self.show_step)
+
+    def _tick(self):
+        now = time.monotonic()
+        if not self.show_active:
+            if self.idle_seconds > 0 and now - self._last_input >= self.idle_seconds:
+                self.start_show()
+            return
+        step = SHOW_STEPS[self.show_step]
+        t = (now - self._step_started) / step.seconds
+        if t >= 1.0:
+            self._enter_step(self.show_step + 1)
+            return
+        if step.knob_to is not None:
+            # straight line from where the knob was to where this step sends it, eased by smoothstep
+            knob = self._knob_from + (step.knob_to - self._knob_from) * smoothstep(t)
+            self._driving = True
+            self.set_knob(knob)
+            self._driving = False
+
+    # ----------------------------------------------------------------------------------------------
+    def toggle_detail(self):
+        """Simple <-> detailed instrument strip, on all screens at once."""
+        self.set_detail(not self.detailed)
+
+    def set_detail(self, on: bool):
+        """Detailed (True) or simple (False) instrument strip."""
+        if self.forward is not None:
+            self.forward("detail", 1 if on else 0)
+            return
+        self._human()
+        if bool(on) != self.detailed:
+            self.detailed = bool(on)
+            self.detail_changed.emit(self.detailed)
+
+    def set_theme(self, name: str):
+        """"light" or "dark", on all screens at once. Not a visitor's input, so it does not stop the idle show."""
+        if name not in ("light", "dark"):
+            return
+        if self.forward is not None:
+            self.forward("theme", 1 if name == "dark" else 0)
+            return
+        if name != self.theme:
+            self.theme = name
+            self.theme_changed.emit(name)
+
+    def toggle_theme(self):
+        self.set_theme("light" if self.theme == "dark" else "dark")
+
+    def request_camera_reset(self):
+        """Every camera on every screen goes back to its starting view."""
+        if self.forward is not None:
+            self.forward("reset", 0)
+            return
+        self._human()
+        self.reset_count += 1
+        self.camera_reset.emit()
+
+    # ----------------------------------------------------------------------------------------------
+    # Two Macs: the host publishes a snapshot, a follower applies it
+    # ----------------------------------------------------------------------------------------------
+    def snapshot(self) -> dict:
+        """Everything a follower needs to show the same thing. Plain numbers only: it goes out as JSON."""
+        return {
+            "wand": int(self.current_wand_index),
+            "knob": float(self.current_knob),
+            "view": int(self.current_view),
+            "detailed": bool(self.detailed),
+            "show_active": bool(self.show_active),
+            "show_step": int(self.show_step),
+            "reset_count": int(self.reset_count),
+            "dark": self.theme == "dark",
+            "wand_count": int(self.wand_count),
+        }
+
+    def apply_sync(self, snap: dict):
+        """Follower side: copy the host's snapshot, then emit a signal for each thing that changed."""
+        wand = max(0, min(self.wand_count - 1, int(snap["wand"])))
+        knob = max(0.0, min(1.0, float(snap["knob"])))
+        view = int(snap["view"]) % VIEW_COUNT
+        detailed = bool(snap["detailed"])
+        show_active = bool(snap["show_active"])
+        show_step = int(snap["show_step"]) % len(SHOW_STEPS)
+        reset_count = int(snap["reset_count"])
+
+        moved = wand != self.current_wand_index or abs(knob - self.current_knob) > 1e-9
+        view_moved = view != self.current_view
+        detail_moved = detailed != self.detailed
+        show_moved = show_active != self.show_active
+        step_moved = show_step != self.show_step
+        reset = reset_count != self.reset_count
+        theme = "dark" if snap.get("dark") else "light"  # a host without themes sends none: light
+        theme_moved = theme != self.theme
+
+        # set everything first: a slot that reads the controller (on_show_changed reads show_step) sees it all
+        self.current_wand_index, self.current_knob, self.current_view = wand, knob, view
+        self.detailed, self.show_active, self.show_step = detailed, show_active, show_step
+        self.reset_count = reset_count
+        self.theme = theme
+
+        if theme_moved:
+            self.theme_changed.emit(self.theme)
+        if moved:
+            self.state_changed.emit(self.current_wand_index, self.current_knob)
+        if view_moved:
+            self.view_changed.emit(self.current_view)
+        if detail_moved:
+            self.detail_changed.emit(self.detailed)
+        if show_moved:
+            self.show_changed.emit(self.show_active)
+        if step_moved:
+            self.show_step_changed.emit(self.show_step)
+        if reset:
+            self.camera_reset.emit()
+
+    def set_wand(self, index: int):
+        """Sets the active smoke-wand index (0..wand_count-1)."""
+        if self.forward is not None:
+            self.forward("wand", max(0, min(self.wand_count - 1, int(index))))
+            return
+        self._human()
+        new_idx = max(0, min(self.wand_count - 1, int(index)))
+        if new_idx != self.current_wand_index:
+            self.current_wand_index = new_idx
+            self.state_changed.emit(self.current_wand_index, self.current_knob)
+
+    def step_wand(self, delta: int):
+        """Moves the wand up (+1) or down (-1)."""
+        self.set_wand(self.current_wand_index + delta)
+
+    def set_knob(self, knob: float):
+        """Sets the direction knob, clamped to [0, 1]."""
+        if self.forward is not None:
+            self.forward("knob", max(0.0, min(1.0, float(knob))))
+            return
+        self._human()
+        new_knob = max(0.0, min(1.0, float(knob)))
+        if abs(new_knob - self.current_knob) > 1e-9:
+            self.current_knob = new_knob
+            self.state_changed.emit(self.current_wand_index, self.current_knob)
+
+    def step_knob(self, steps: float):
+        """Turns the knob by `steps` detents (one detent is knob_step of the full sweep)."""
+        self.set_knob(self.current_knob + steps * self.knob_step)
+
+    def set_view(self, view: int):
+        """Sets the view mode (0..VIEW_COUNT-1)."""
+        if self.forward is not None:
+            self.forward("view", int(view) % VIEW_COUNT)
+            return
+        self._human()
+        new_view = int(view) % VIEW_COUNT
+        if new_view != self.current_view:
+            self.current_view = new_view
+            self.view_changed.emit(self.current_view)
+
+    def cycle_view(self):
+        """Next view mode: 0 -> 1 -> 2 -> 0."""
+        self.set_view(self.current_view + 1)
 
     def handle_key_press(self, event: QKeyEvent) -> bool:
         """
         Processes HID keypresses from the macropad or regular keyboard.
         Returns True if handled, False otherwise.
         """
-        key_text = event.text()
         key_code = event.key()
+        self._human()  # any key counts as a visitor, even one that does nothing
 
-        # 1. 10 Discrete Z-Step Buttons (Macropad row: '1'..'9', '0')
+        # 1. 10 Discrete Wand Buttons (Macropad row: '1'..'9', '0')
         digit_map = {
             Qt.Key_1: 0, Qt.Key_2: 1, Qt.Key_3: 2, Qt.Key_4: 3, Qt.Key_5: 4,
             Qt.Key_6: 5, Qt.Key_7: 6, Qt.Key_8: 7, Qt.Key_9: 8, Qt.Key_0: 9
         }
         if key_code in digit_map:
-            self.set_z_step(digit_map[key_code])
+            self.set_wand(digit_map[key_code])
             return True
 
-        # 2. Z Step Up / Down
+        # 2. Wand Up / Down
         if key_code in [Qt.Key_Up, Qt.Key_W]:
-            self.step_z(1)
+            self.step_wand(1)
             return True
         elif key_code in [Qt.Key_Down, Qt.Key_S]:
-            self.step_z(-1)
+            self.step_wand(-1)
             return True
 
-        # 3. Wind Velocity Knob (Clockwise / Counter-Clockwise pulses)
+        # 3. Wind Direction Knob (Clockwise / Counter-Clockwise pulses)
         if key_code in [Qt.Key_Right, Qt.Key_D, Qt.Key_Plus, Qt.Key_Equal, Qt.Key_BracketRight]:
-            self.step_wind_speed(self.speed_step)
+            self.step_knob(1)
             return True
         elif key_code in [Qt.Key_Left, Qt.Key_A, Qt.Key_Minus, Qt.Key_Underscore, Qt.Key_BracketLeft]:
-            self.step_wind_speed(-self.speed_step)
+            self.step_knob(-1)
+            return True
+
+        # 4. View mode
+        if key_code == Qt.Key_Tab:
+            self.cycle_view()
+            return True
+
+        # 5. Simple / detailed strip, and camera reset
+        if key_code == Qt.Key_Space:
+            self.toggle_detail()
+            return True
+        if key_code == Qt.Key_R:
+            self.request_camera_reset()
+            return True
+        if key_code == Qt.Key_T:
+            self.toggle_theme()
             return True
 
         return False
 
     def handle_wheel_event(self, event: QWheelEvent) -> bool:
-        """Mouse wheel can simulate turning the physical velocity rotary knob."""
+        """Mouse wheel can simulate turning the physical rotary knob (one notch = 15 degrees = 1 detent)."""
+        self._human()
         num_degrees = event.angleDelta().y() / 8.0
         num_steps = num_degrees / 15.0
         if abs(num_steps) > 0.01:
-            self.step_wind_speed(num_steps * (self.speed_step * 0.5))
+            self.step_knob(num_steps)
             return True
         return False

@@ -1,0 +1,505 @@
+"""Tests for solver.foam.importer and app.cache_format: OpenFOAM results -> v2 cache."""
+import json
+import math
+from dataclasses import replace
+from pathlib import Path
+
+import numpy as np
+import pyvista as pv
+import pytest
+import trimesh
+
+from app.cache_format import FORMAT_VERSION, read_cache, state_key, wand_key, write_cache
+from solver.foam.geometry import frontal_area, rotation_matrix, run_geometry, wand_heights
+from solver.foam.importer import import_object
+from solver.foam.settings import ObjectCfd, load_settings
+from solver.foam.sustainability import drag_power_kw, fuel_burn_l_per_hr, fuel_and_co2, speed_gain_pct
+from tests.fake_cache import write_fake_cache
+
+ROOT = Path(__file__).resolve().parent.parent
+RHO = 1.225
+SPEED = 20.0
+DIRS = (0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0)  # idx 0 = 0 deg, idx 4 = 40 deg
+
+OBJ_CONFIG = {
+    "id": "box", "display_name": "Test Box",
+    "fuel_burn_factor_l_per_kwh": 0.28, "co2_kg_per_l_fuel": 2.52,
+    "cfd": {"widgets": ["fuel", "speed"]},
+}
+
+
+def make_settings():
+    settings, _, _ = load_settings(ROOT / "config" / "exhibition_config.json")
+    return replace(settings, wand_count=3, seeds_per_wand=4)
+
+
+def make_cfd(**over):
+    base = dict(
+        obj_id="box", speed_m_s=SPEED, real_size_m=4.0, size_axis="x",
+        base_rotation_deg=(0.0, 0.0, 0.0), rotation_axis="y", directions_deg=DIRS,
+        direction_label="angle", floor="none", density_kg_m3=RHO, kinematic_viscosity_m2_s=1.5e-5,
+        cruise=None, abl_z0_m=None, widgets=("fuel", "speed"), surface_refinement=None,
+    )
+    base.update(over)
+    return ObjectCfd(**base)
+
+
+def make_model0():
+    """A 4 x 2 x 2 box cut into small triangles, so nearest-cell lookups are accurate to ~0.2 m."""
+    return trimesh.creation.box(extents=(4.0, 2.0, 2.0)).subdivide_to_size(0.3)
+
+
+def force_text(rows):
+    head = "# Force\n# CofR : (0 0 0)\n#\n# Time total_x total_y total_z pressure_x pressure_y pressure_z viscous_x viscous_y viscous_z\n"
+    return head + "".join(f"{i} {fx} {fy} {fz} 0 0 0 0 0 0\n" for i, fx, fy, fz in rows)
+
+
+def write_fake_result(
+    root, cfd, model0, idx, *, status="done", fields="instant", forces=None, moments=None,
+    p_inst=1.0, p_mean=3.0, cell_only=False,
+):
+    """Write runs/<root>/<obj>/<run>/result/ in the layout the real pipeline produces."""
+    deg = cfd.directions_deg[idx]
+    run_id = f"{cfd.obj_id}_d{idx}"
+    result = Path(root) / cfd.obj_id / run_id / "result"
+    result.mkdir(parents=True)
+    (result / "run.json").write_text(json.dumps({
+        "run_id": run_id, "obj_id": cfd.obj_id, "direction_index": idx, "direction_deg": deg,
+        "speed_m_s": SPEED, "iterations": 300, "converged": status == "done", "fields": fields, "status": status,
+    }))
+    forces = forces if forces is not None else [(i, 100.0, 5.0, 20.0) for i in range(1, 301)]
+    moments = moments if moments is not None else [(i, 30.0, 40.0, 1.0) for i in range(1, 301)]
+    pp = result / "postProcessing" / "forces" / "0"
+    pp.mkdir(parents=True)
+    (pp / "force.dat").write_text(force_text(forces))
+    (pp / "moment.dat").write_text(force_text(moments))
+
+    def write_time(time, p_scale, k_offset):
+        vdir = result / "VTK" / f"{run_id}_{time}"
+        (vdir / "boundary").mkdir(parents=True)
+        grid = pv.ImageData(dimensions=(41, 25, 25), spacing=(1, 1, 1), origin=(-12, -12, -12)).cast_to_unstructured_grid()
+        for suffix, p, ko in (("", p_inst * p_scale, k_offset), ("Mean", p_mean * p_scale, k_offset + 100)):
+            x, y, _ = grid.points.T
+            grid.point_data["U" + suffix] = np.column_stack([SPEED + 0.1 * y, 0 * x, 0 * x])
+            grid.point_data["p" + suffix] = np.full(len(x), p)
+            grid.point_data["k" + suffix] = x + ko
+        grid.point_data["nut"] = np.full(grid.n_points, 0.5)  # a mean-field run still writes plain nut
+        if cell_only:  # an export with cell data only: same linear fields, sampled at the cell centres
+            centres = grid.cell_centers().points
+            cx, cy = centres[:, 0], centres[:, 1]
+            grid.point_data.clear()
+            for suffix, p, ko in (("", p_inst * p_scale, k_offset), ("Mean", p_mean * p_scale, k_offset + 100)):
+                grid.cell_data["U" + suffix] = np.column_stack([SPEED + 0.1 * cy, 0 * cx, 0 * cx])
+                grid.cell_data["p" + suffix] = np.full(len(cx), p)
+                grid.cell_data["k" + suffix] = cx + ko
+            grid.cell_data["nut"] = np.full(grid.n_cells, 0.5)
+        grid.save(vdir / "internal.vtu")
+        run_model = run_geometry(model0, cfd, deg)
+        patch = pv.PolyData.from_regular_faces(np.asarray(run_model.vertices), np.asarray(run_model.faces))
+        r = rotation_matrix(cfd.rotation_axis, deg)
+        centres_model = patch.cell_centers().points @ r  # back to the model frame
+        for suffix, scale in (("", p_scale * p_inst), ("Mean", p_scale * p_mean)):
+            # cell pressure = model-frame x (times scale): lets a test check the rotation bookkeeping
+            patch.cell_data["p" + suffix] = centres_model[:, 0] * scale
+        patch.save(vdir / "boundary" / "model.vtp")
+
+    write_time(50, 999.0, 0.0)  # an older save: must be ignored
+    write_time(300, 1.0, 100.0)
+    return result
+
+
+@pytest.fixture
+def root(tmp_path):
+    return tmp_path / "runs"
+
+
+def run_import(root, tmp_path, cfd=None, obj_config=OBJ_CONFIG, model0=None):
+    cfd = cfd or make_cfd()
+    model0 = model0 or make_model0()
+    out = tmp_path / "cache" / "box_states.npz"
+    report = import_object("box", make_settings(), cfd, model0, obj_config, root, out)
+    return report, out, model0, cfd
+
+
+def test_import_fake_result(root, tmp_path):
+    cfd, model0 = make_cfd(), make_model0()
+    write_fake_result(root, cfd, model0, 0)
+    write_fake_result(root, cfd, model0, 4)
+    report, out, _, _ = run_import(root, tmp_path, cfd, model0=model0)
+
+    assert report["imported"] == [0, 4]
+    assert report["flagged"] == []
+    assert report["filled"] == {1: 0, 2: 0, 3: 4, 5: 4, 6: 4, 7: 4, 8: 4}  # nearest direction; ties -> lower
+
+    c = read_cache(out)
+    assert c["format_version"] == FORMAT_VERSION == 2
+    assert c["mesh_vertices"].shape == (len(model0.vertices), 3) and c["mesh_vertices"].dtype == np.float32
+    assert c["mesh_faces"].dtype == np.int32
+    assert c["directions_deg"].tolist() == list(DIRS)
+    assert c["wand_heights"].shape == (3,)
+    assert c["view_bounds"].shape == (6,)
+    assert json.loads(c["config_json"])["id"] == "box"
+    np.testing.assert_allclose(c["wind_vectors"][0], [1, 0, 0], atol=1e-9)
+    np.testing.assert_allclose(c["wind_vectors"][4], rotation_matrix("y", 40.0).T @ [1, 0, 0], atol=1e-9)
+
+    for d in range(9):
+        s = state_key(d)
+        assert c[f"{s}_pressure"].shape == (len(model0.vertices),) and c[f"{s}_pressure"].dtype == np.float32
+        terms = json.loads(c[f"{s}_ns_terms"])
+        assert set(terms) == {"convective", "pressure", "viscous"}
+        for w in range(3):
+            key = wand_key(d, w)
+            lines, k, dom = c[f"{key}_lines"], c[f"{key}_k"], c[f"{key}_dominant"]
+            assert lines.shape[1] == 3 and lines.dtype == np.float32
+            assert len(k) == len(dom) == len(lines) and k.dtype == np.float32 and dom.dtype == np.int8
+            sep = np.isnan(lines).any(axis=1)
+            assert sep.any() and (~sep).sum() >= 8  # NaN separators and real points
+            assert np.array_equal(sep, np.isnan(k)) and np.array_equal(sep, dom == -1)
+            assert set(dom[~sep].tolist()) <= {0, 1, 2}
+            speed = c[f"{key}_speed"]  # |U| along the lines: NaN at the same separators, positive elsewhere
+            assert speed.dtype == np.float32 and len(speed) == len(lines)
+            assert np.array_equal(sep, np.isnan(speed)) and np.all(speed[~sep] > 0)
+    # filled directions copy the source arrays and say where from
+    np.testing.assert_array_equal(c["d2_pressure"], c["d0_pressure"])
+    np.testing.assert_array_equal(c["d3_w0_lines"], c["d4_w0_lines"])
+    m0, m2, m3 = (json.loads(c[f"d{i}_metrics"]) for i in (0, 2, 3))
+    assert m0["filled_from"] is None and m2["filled_from"] == 0 and m3["filled_from"] == 4
+    # a filled slot reports its own angle, while the numbers come from the source run
+    assert (m0["direction_deg"], m2["direction_deg"], m3["direction_deg"]) == (0.0, 20.0, 30.0)
+    assert m2["drag_force_n"] == m0["drag_force_n"]
+
+
+def test_metrics_values(root, tmp_path):
+    cfd, model0 = make_cfd(), make_model0()
+    write_fake_result(root, cfd, model0, 4)
+    _, out, _, _ = run_import(root, tmp_path, cfd, model0=model0)
+    m = json.loads(read_cache(out)["d4_metrics"])
+    area = frontal_area(run_geometry(model0, cfd, 40.0))
+    q_a = 0.5 * RHO * SPEED**2 * area
+    assert m["direction_deg"] == 40.0 and m["wind_speed_m_s"] == SPEED
+    assert m["reynolds_number"] == pytest.approx(SPEED * 4.0 / 1.5e-5)
+    assert (m["drag_force_n"], m["side_force_n"], m["lift_force_n"]) == (100.0, 5.0, 20.0)
+    assert m["frontal_area_m2"] == pytest.approx(area)
+    assert m["drag_coefficient_cd"] == pytest.approx(100.0 / q_a)
+    assert m["lift_coefficient_cl"] == pytest.approx(20.0 / q_a)
+    assert m["drag_power_kw"] == pytest.approx(drag_power_kw(m["drag_coefficient_cd"], area, RHO, SPEED))
+    assert m["drag_power_kw"] == pytest.approx(100.0 * SPEED / 1000)  # P = F v
+    assert m["base_moment_nm"] == pytest.approx(50.0)  # hypot(30, 40)
+    assert (m["iterations"], m["converged"], m["filled_from"]) == (300, True, None)
+    # one finished direction: it is its own reference, so nothing is saved against it
+    assert m["eval_drag_power_kw"] == pytest.approx(m["drag_power_kw"])  # no cruise: simulated condition
+    assert m["eval_speed_m_s"] == SPEED and m["eval_altitude_km"] == 0.0  # sea level: no cruise block
+    assert m["fuel_burn_l_per_hr"] == pytest.approx(m["drag_power_kw"] * 0.28)
+    assert (m["fuel_saved_l_per_hr"], m["co2_saved_kg_per_hr"], m["speed_gain_pct"]) == (0.0, 0.0, 0.0)
+    assert m["reference_direction_deg"] == 40.0
+    assert "wind_load" not in m
+    assert all(isinstance(v, (int, float, bool, type(None))) for k, v in m.items())
+
+
+def test_plane_uses_cruise_condition(root, tmp_path):
+    cfd = make_cfd(cruise={"density_kg_m3": 0.364, "speed_m_s": 250.0, "altitude_km": 11})
+    model0 = make_model0()
+    write_fake_result(root, cfd, model0, 4)
+    _, out, _, _ = run_import(root, tmp_path, cfd, model0=model0)
+    m = json.loads(read_cache(out)["d4_metrics"])
+    cda = m["drag_coefficient_cd"] * m["frontal_area_m2"]
+    assert m["eval_drag_power_kw"] == pytest.approx(0.5 * 0.364 * cda * 250.0**3 / 1000.0)
+    assert m["eval_speed_m_s"] == 250.0
+    assert m["eval_altitude_km"] == 11.0  # from the config's cruise block, shown on the HUD note
+    assert m["fuel_burn_l_per_hr"] == pytest.approx(m["eval_drag_power_kw"] * 0.28)
+    assert m["drag_power_kw"] == pytest.approx(100.0 * SPEED / 1000)  # the simulated value is unchanged
+
+
+def forces_of(fx, fz=20.0):
+    return [(i, fx, 5.0, fz) for i in range(1, 301)]
+
+
+def test_reference_is_worst_imported_direction(root, tmp_path):
+    """Three finished directions with different drag: the highest-power one is the reference."""
+    cfd, model0 = make_cfd(), make_model0()
+    write_fake_result(root, cfd, model0, 0, forces=forces_of(60.0))
+    write_fake_result(root, cfd, model0, 4, forces=forces_of(150.0))  # the worst
+    write_fake_result(root, cfd, model0, 8, forces=forces_of(100.0))
+    report, out, _, _ = run_import(root, tmp_path, cfd, model0=model0)
+    c = read_cache(out)
+    ms = {d: json.loads(c[f"d{d}_metrics"]) for d in range(9)}
+
+    p = {d: ms[d]["eval_drag_power_kw"] for d in (0, 4, 8)}
+    assert max(p, key=p.get) == 4
+    assert all(m["reference_direction_deg"] == 40.0 for m in ms.values())
+    assert ms[4]["fuel_saved_l_per_hr"] == 0.0 and ms[4]["speed_gain_pct"] == 0.0
+    for d in (0, 8):
+        assert ms[d]["fuel_saved_l_per_hr"] == pytest.approx((p[4] - p[d]) * 0.28)
+        assert ms[d]["co2_saved_kg_per_hr"] == pytest.approx(ms[d]["fuel_saved_l_per_hr"] * 2.52)
+        cda, cda_ref = (m["drag_coefficient_cd"] * m["frontal_area_m2"] for m in (ms[d], ms[4]))
+        assert ms[d]["speed_gain_pct"] == pytest.approx(((cda_ref / cda) ** (1 / 3) - 1) * 100)
+        assert ms[d]["fuel_saved_l_per_hr"] > 0 and ms[d]["speed_gain_pct"] > 0
+    # filled slots take the same formulas on their copied forces and keep their own angle
+    assert report["filled"][3] == 4 and ms[3]["filled_from"] == 4
+    assert ms[3]["direction_deg"] == 30.0 and ms[3]["fuel_saved_l_per_hr"] == 0.0
+    assert ms[1]["filled_from"] == 0 and ms[1]["fuel_saved_l_per_hr"] == pytest.approx(ms[0]["fuel_saved_l_per_hr"])
+
+
+def test_aircraft_is_compared_with_its_best_lift_to_drag_angle(root, tmp_path):
+    """With a cruise mass, power is level-flight drag W/(L/D) x v and the reference is the highest-L/D angle."""
+    cfd = make_cfd(cruise={"density_kg_m3": 0.364, "speed_m_s": 250.0, "altitude_km": 11, "mass_kg": 1000.0})
+    model0 = make_model0()
+    write_fake_result(root, cfd, model0, 0, forces=forces_of(100.0, 200.0))   # L/D 2
+    write_fake_result(root, cfd, model0, 4, forces=forces_of(100.0, 1000.0))  # L/D 10: the best
+    write_fake_result(root, cfd, model0, 8, forces=forces_of(100.0, -50.0))   # pushed down: cannot fly level
+    _, out, _, _ = run_import(root, tmp_path, cfd, model0=model0)
+    c = read_cache(out)
+    ms = {d: json.loads(c[f"d{d}_metrics"]) for d in (0, 4, 8)}
+    assert ms[4]["lift_to_drag"] == pytest.approx(10.0) and ms[0]["lift_to_drag"] == pytest.approx(2.0)
+    assert ms[0]["eval_drag_power_kw"] == pytest.approx(1000.0 * 9.81 / 2.0 * 250.0 / 1000.0)  # (W / (L/D)) v
+    assert all(m["reference_is_best"] and m["reference_direction_deg"] == 40.0 for m in ms.values())
+    assert ms[4]["fuel_saved_l_per_hr"] == 0.0
+    extra = (ms[0]["eval_drag_power_kw"] - ms[4]["eval_drag_power_kw"]) * 0.28
+    assert ms[0]["fuel_saved_l_per_hr"] == pytest.approx(extra) and extra > 0
+    assert ms[0]["co2_saved_kg_per_hr"] == pytest.approx(extra * 2.52)
+    assert all(m["speed_gain_pct"] == 0.0 for m in ms.values())
+    # no upward lift: falls back to the Cd A power at cruise, never a division by a negative ratio
+    cda = ms[8]["drag_coefficient_cd"] * ms[8]["frontal_area_m2"]
+    assert ms[8]["eval_drag_power_kw"] == pytest.approx(0.5 * 0.364 * cda * 250.0**3 / 1000.0)
+
+
+def test_filled_direction_is_never_the_reference(root, tmp_path):
+    """The only filled slot that could look worst copies a finished one; the reference is still a finished angle."""
+    cfd, model0 = make_cfd(), make_model0()
+    write_fake_result(root, cfd, model0, 0, forces=forces_of(150.0))  # the worst, at 0 deg
+    write_fake_result(root, cfd, model0, 8, forces=forces_of(60.0))
+    _, out, _, _ = run_import(root, tmp_path, cfd, model0=model0)
+    c = read_cache(out)
+    refs = {json.loads(c[f"d{d}_metrics"])["reference_direction_deg"] for d in range(9)}
+    assert refs == {0.0}  # not 10.0, 20.0 ... (filled copies of the 0 deg run)
+    m1 = json.loads(c["d1_metrics"])
+    assert m1["filled_from"] == 0 and m1["direction_deg"] == 10.0
+
+
+def test_wind_load_table_for_wind_load_objects(root, tmp_path):
+    cfd = make_cfd(widgets=("wind_load",))
+    model0 = make_model0()
+    write_fake_result(root, cfd, model0, 4)
+    _, out, _, _ = run_import(root, tmp_path, cfd, model0=model0)
+    m = json.loads(read_cache(out)["d4_metrics"])
+    cat5 = m["wind_load"][-1]
+    assert cat5["v_m_s"] == 70
+    assert cat5["force_n"] == pytest.approx(math.hypot(100.0, 5.0) * (70 / SPEED) ** 2)  # horizontal force |(Fx, Fy)|
+    assert cat5["moment_nm"] == pytest.approx(50.0 * (70 / SPEED) ** 2)
+
+
+def test_wind_load_force_is_the_horizontal_force_not_just_fx(root, tmp_path):
+    """A tower turned to the wind feels a sideways force too: use hypot(Fx, Fy), like the moment's hypot(Mx, My)."""
+    cfd = make_cfd(widgets=("wind_load",))
+    model0 = make_model0()
+    write_fake_result(root, cfd, model0, 4, forces=[(i, 60.0, 80.0, 20.0) for i in range(1, 301)])
+    _, out, _, _ = run_import(root, tmp_path, cfd, model0=model0)
+    m = json.loads(read_cache(out)["d4_metrics"])
+    assert m["wind_load"][-1]["force_n"] == pytest.approx(100.0 * (70 / SPEED) ** 2)  # hypot(60, 80) = 100
+    assert m["drag_force_n"] == 60.0 and m["side_force_n"] == 80.0  # the plain components are kept
+
+
+def test_result_with_a_different_direction_than_the_config_is_skipped_with_a_warning(root, tmp_path):
+    cfd, model0 = make_cfd(), make_model0()
+    write_fake_result(root, cfd, model0, 0)
+    write_fake_result(root, cfd, model0, 4)
+    run_json = root / "box" / "box_d4" / "result" / "run.json"
+    meta = json.loads(run_json.read_text())
+    meta["direction_deg"] = 37.5  # the config now says 40: the run was made for another angle
+    run_json.write_text(json.dumps(meta))
+    with pytest.warns(UserWarning, match=r"box_d4.*37.5.*40"):
+        report, out, _, _ = run_import(root, tmp_path, cfd, model0=model0)
+    assert report["imported"] == [0]  # treated as not finished: the slot is filled instead
+    assert report["filled"][4] == 0
+
+
+def test_all_results_mismatching_the_config_is_an_error(root, tmp_path):
+    cfd, model0 = make_cfd(), make_model0()
+    write_fake_result(root, cfd, model0, 4)
+    run_json = root / "box" / "box_d4" / "result" / "run.json"
+    meta = json.loads(run_json.read_text())
+    meta["direction_deg"] = 41.0
+    run_json.write_text(json.dumps(meta))
+    with pytest.warns(UserWarning), pytest.raises(ValueError, match="No finished runs for box"):
+        run_import(root, tmp_path, cfd, model0=model0)
+
+
+def test_floor_bound_object_has_no_wand_underground(root, tmp_path):
+    """A model standing on the floor (zmin = 0): wand 0 sits just above it, not at -0.1 H."""
+    cfd = make_cfd(floor="moving")
+    model0 = make_model0()
+    model0.apply_translation((0, 0, 1.0))  # box now spans z in [0, 2]
+    write_fake_result(root, cfd, model0, 4)
+    _, out, _, _ = run_import(root, tmp_path, cfd, model0=model0)
+    heights = read_cache(out)["wand_heights"]
+    assert heights[0] == pytest.approx(0.02 * 2.0) and heights[-1] == pytest.approx(2.0 + 0.2)
+    assert np.all(heights > 0)
+
+
+def test_pressure_follows_rotation(root, tmp_path):
+    """Patch cell pressure = model-frame x, so after the R(theta) bookkeeping each vertex sees its own x."""
+    cfd, model0 = make_cfd(), make_model0()
+    write_fake_result(root, cfd, model0, 4, p_inst=1.0)
+    _, out, _, _ = run_import(root, tmp_path, cfd, model0=model0)
+    c = read_cache(out)
+    p_kinematic = c["d4_pressure"] / RHO
+    assert np.abs(p_kinematic - model0.vertices[:, 0]).max() < 0.5
+
+
+def test_pressure_does_not_leak_through_a_thin_plate():
+    """A 0.02-thick plate: +1 on the top faces, -1 underneath. Every vertex keeps its own side's value,
+    and a vertex between faces with different values gets an average, not a jump."""
+    from solver.foam.importer import _pressure_on_model
+
+    plate = trimesh.creation.box(extents=(2.0, 1.0, 0.02))
+    plate = plate.subdivide().subdivide()
+    patch = pv.PolyData.from_regular_faces(np.asarray(plate.vertices), np.asarray(plate.faces))
+    patch = patch.compute_normals(cell_normals=True, point_normals=False, auto_orient_normals=True)
+    nz = patch.cell_data["Normals"][:, 2]
+    patch.cell_data["p"] = np.where(nz > 0.5, 1.0, np.where(nz < -0.5, -1.0, 0.0))
+    patch.flip_faces(inplace=True)  # solver faces point into the solid, like OpenFOAM's boundary
+    display = trimesh.creation.box(extents=(2.0, 1.0, 0.02)).subdivide()
+    p = _pressure_on_model(patch, "p", display, np.eye(3), rho=1.0)
+    top = (display.vertex_normals[:, 2] > 0.9)
+    bottom = (display.vertex_normals[:, 2] < -0.9)
+    assert top.any() and bottom.any()
+    assert np.all(p[top] > 0.5) and np.all(p[bottom] < -0.5)
+
+
+def test_lines_are_back_in_model_frame_and_k_is_sampled(root, tmp_path):
+    """k = x_run + 100 in the file; a streamline point in the model frame maps back through R."""
+    cfd, model0 = make_cfd(), make_model0()
+    write_fake_result(root, cfd, model0, 4)
+    _, out, _, _ = run_import(root, tmp_path, cfd, model0=model0)
+    c = read_cache(out)
+    lines, k = c["d4_w1_lines"], c["d4_w1_k"]
+    ok = ~np.isnan(k)
+    assert ok.sum() > 8
+    x_run = (lines[ok].astype(float) @ rotation_matrix("y", 40.0).T)[:, 0]
+    np.testing.assert_allclose(k[ok], x_run + 100.0, atol=0.05)
+    # the middle wand rake sits at the model's mid-height in the model frame, so seeds start near z0
+    z0 = wand_heights(model0, 3)[1]
+    first = lines[~np.isnan(lines).any(axis=1)][0]
+    assert abs(first[2] - z0) < 3.0  # the rake is tilted by the 40 degree rotation, so allow slack
+
+
+def test_import_with_no_results_raises(root, tmp_path):
+    cfd, model0 = make_cfd(), make_model0()
+    out = tmp_path / "cache" / "box_states.npz"
+    with pytest.raises(ValueError, match="No finished runs for box"):
+        import_object("box", make_settings(), cfd, model0, OBJ_CONFIG, root, out)
+    assert not out.exists()
+
+
+def test_cell_only_internal_mesh_is_accepted(root, tmp_path):
+    """U, p, k and nut that exist only as cell data are averaged onto the points (no KeyError)."""
+    cfd, model0 = make_cfd(), make_model0()
+    write_fake_result(root, cfd, model0, 4, cell_only=True)
+    _, out, _, _ = run_import(root, tmp_path, cfd, model0=model0)
+    c = read_cache(out)
+    lines, k = c["d4_w1_lines"], c["d4_w1_k"]
+    ok = ~np.isnan(k)
+    assert ok.sum() > 8
+    x_run = (lines[ok].astype(float) @ rotation_matrix("y", 40.0).T)[:, 0]
+    np.testing.assert_allclose(k[ok], x_run + 100.0, atol=1.0)  # cell-to-point averaging blurs by < 1 cell
+    assert set(json.loads(c["d4_ns_terms"])) == {"convective", "pressure", "viscous"}
+
+
+def test_failed_and_unfinished_runs_are_not_finished(root, tmp_path):
+    cfd, model0 = make_cfd(), make_model0()
+    write_fake_result(root, cfd, model0, 2, status="failed")
+    stub = root / "box" / "box_d6" / "result"  # a result folder with no run.json at all
+    stub.mkdir(parents=True)
+    out = tmp_path / "cache" / "box_states.npz"
+    with pytest.raises(ValueError, match="No finished runs for box"):
+        import_object("box", make_settings(), cfd, model0, OBJ_CONFIG, root, out)
+    assert not out.exists()
+
+
+def test_flagged_run_uses_mean_fields(root, tmp_path):
+    cfd, model0 = make_cfd(), make_model0()
+    forces = [(i, 100.0 + i, 5.0, 20.0) for i in range(1, 151)]
+    write_fake_result(root, cfd, model0, 4, status="flagged", fields="mean", forces=forces)
+    report, out, _, _ = run_import(root, tmp_path, cfd, model0=model0)
+    assert report["flagged"] == [4] and report["imported"] == [4]
+    c = read_cache(out)
+    # pMean patch = model x * p_mean (3) -> vertex pressure ~ 3 * x * rho, not 1 * x * rho
+    ratio = (c["d4_pressure"] / RHO) / np.where(model0.vertices[:, 0] == 0, np.nan, model0.vertices[:, 0])
+    assert np.nanmedian(ratio) == pytest.approx(3.0, rel=0.2)
+    lines_k = c["d4_w1_k"]
+    assert np.nanmin(lines_k) > 150.0  # kMean = x + 200 (+100 mean offset): the 'k' set would be ~100
+    m = json.loads(c["d4_metrics"])
+    assert m["drag_force_n"] == pytest.approx(np.mean([100.0 + i for i in range(51, 151)]))  # mean of last 100 rows
+    assert m["converged"] is False
+
+
+def test_force_history_across_restart_dirs(root, tmp_path):
+    cfd, model0 = make_cfd(), make_model0()
+    result = write_fake_result(root, cfd, model0, 4, forces=[(i, 100.0, 5.0, 20.0) for i in range(1, 151)])
+    restart = result / "postProcessing" / "forces" / "100"
+    restart.mkdir()
+    (restart / "force.dat").write_text(force_text([(i, 777.0, 5.0, 20.0) for i in range(101, 201)]))
+    (restart / "moment.dat").write_text(force_text([(i, 30.0, 40.0, 1.0) for i in range(101, 201)]))
+    _, out, _, _ = run_import(root, tmp_path, cfd, model0=model0)
+    assert json.loads(read_cache(out)["d4_metrics"])["drag_force_n"] == 777.0  # last row of the later segment
+
+
+def test_fake_cache_is_a_valid_v2_cache(tmp_path):
+    cfg = {"id": "box", "cfd": {"widgets": ["wind_load"]}}
+    path = tmp_path / "fake.npz"
+    write_fake_cache(path, cfg, n_dir=5, n_wand=4)
+    c = read_cache(path)
+    assert c["directions_deg"].shape == (5,) and c["wand_heights"].shape == (4,)
+    for d in range(5):
+        assert np.all(c[f"d{d}_pressure"] == d)  # constant d: interpolation is checkable
+        for w in range(4):
+            lines = c[f"d{d}_w{w}_lines"]
+            real = lines[~np.isnan(lines).any(axis=1)]
+            assert np.isnan(lines).any() and len(real) > 1
+            assert np.allclose(real[:, 2], real[0, 2])  # straight, at wand height
+        assert "wind_load" in json.loads(c[f"d{d}_metrics"])
+
+
+def test_read_cache_rejects_other_versions(tmp_path):
+    old = tmp_path / "old.npz"
+    np.savez_compressed(old, z_steps=np.arange(3))  # a v1-style cache has no format_version
+    with pytest.raises(ValueError, match="format"):
+        read_cache(old)
+    wrong = tmp_path / "wrong.npz"
+    np.savez_compressed(wrong, format_version=np.array(1))
+    with pytest.raises(ValueError, match="format"):
+        read_cache(wrong)
+
+
+def test_write_cache_roundtrip(tmp_path):
+    path = tmp_path / "c.npz"
+    write_cache(path, {"format_version": 2, "a": np.arange(3, dtype=np.float32), "config_json": json.dumps({"x": 1})})
+    c = read_cache(path)
+    assert c["format_version"] == 2 and c["a"].dtype == np.float32
+    assert json.loads(c["config_json"]) == {"x": 1}
+
+
+# --- final fix wave: command-line import keeps going when one object fails ---
+
+def test_import_results_reports_each_failure_and_continues(tmp_path, monkeypatch, capsys):
+    from solver import import_results
+
+    calls = []
+
+    def fake_import(obj_id, *args, **kwargs):
+        calls.append(obj_id)
+        if obj_id == "airplane":
+            raise KeyError("no such column")  # not a ValueError/OSError: used to abort the whole import
+        return {"imported": [0], "filled": {}, "flagged": []}
+
+    monkeypatch.setattr(import_results, "load_prepared", lambda path, cfd: None)
+    monkeypatch.setattr(import_results, "import_object", fake_import)
+    code = import_results.main(["--root", str(tmp_path), "--out-dir", str(tmp_path / "out")])
+    captured = capsys.readouterr()
+    assert code == 1
+    assert calls == ["airplane", "f1_car", "building", "human"]  # every object was tried
+    assert "airplane: FAILED - KeyError" in captured.err and "no such column" in captured.err
+    assert "f1_car: imported" in captured.out and "human: imported" in captured.out
+
+    calls.clear()
+    assert import_results.main(["--root", str(tmp_path), "--objects", "human", "--out-dir", str(tmp_path / "out")]) == 0

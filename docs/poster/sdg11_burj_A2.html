@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>828 metres in the wind</title>
+<link rel="stylesheet" href="sdg.css">
+<style>
+  :root { --sdg: #FD9D24; } /* official SDG 11 orange-yellow */
+  header { top: 24mm; }
+  .lede { margin-top: 6mm; font-size: 6.4mm; max-width: 340mm; }
+
+  .hero { left: 4mm; height: 318mm; top: 106mm; }
+
+  /* lettered notes on the render */
+  .note { position: absolute; display: flex; align-items: flex-start; gap: 2.4mm; width: 84mm; }
+  .note.left { flex-direction: row-reverse; text-align: right; }
+  .note .n { flex: none; width: 6.8mm; height: 6.8mm; border-radius: 50%; background: var(--ink); color: #FFFFFF;
+    font-size: 3.9mm; font-weight: 600; display: flex; align-items: center; justify-content: center; margin-top: -3.4mm;
+    box-shadow: 0 0 0 0.8mm #FFFFFF; }
+  .note p { font-size: 4.2mm; line-height: 1.35; margin-top: -2.4mm; background: rgba(255,255,255,0.86); padding: 0.5mm 1.1mm; }
+  .note b { font-weight: 600; }
+
+  /* a chart block: step number + heading, the chart, a short caption */
+  .blk { position: absolute; }
+  .blk h3 { font-size: 5.6mm; font-weight: 600; line-height: 1.2; }
+  .blk h3 em { font-style: normal; color: var(--ink-2); font-weight: 400; margin-right: 1.6mm; }
+  .blk p { font-size: 4.3mm; line-height: 1.4; color: var(--ink-2); margin-top: 2mm; }
+  .blk .m { font-family: "STIX Two Text", serif; font-size: 5.2mm; color: var(--ink); white-space: nowrap; }
+  .blk img { display: block; margin-top: 3mm; }
+
+  .key { position: absolute; left: 206mm; right: 32mm; top: 398mm; gap: 8mm; }
+  .key .ends { font-size: 3.6mm; }
+
+  /* bottom band */
+  .band { position: absolute; left: 32mm; right: 32mm; top: 428mm; display: grid; grid-template-columns: 1.05fr 1.1fr 0.85fr;
+    gap: 12mm; border-top: 0.4mm solid var(--rule); padding-top: 8mm; }
+  .band h3 { font-size: 5.6mm; font-weight: 600; line-height: 1.2; }
+  .band p, .band li { font-size: 4.2mm; line-height: 1.4; color: var(--ink-2); }
+  .ns { font-family: "STIX Two Text", serif; font-size: 7.6mm; margin-top: 4mm; white-space: nowrap; color: var(--ink); }
+  .ns .gone { color: #B0B0B0; text-decoration: line-through; }
+  .terms { margin-top: 3.4mm; }
+  .term { display: grid; grid-template-columns: 30mm 1fr 15mm; align-items: center; gap: 2.4mm; margin-top: 2mm; font-size: 3.9mm; }
+  .term .t { height: 3.6mm; }
+  .term .v { text-align: right; font-variant-numeric: tabular-nums; color: var(--ink); }
+  .diff { list-style: none; margin-top: 3mm; }
+  .diff li { margin-top: 2mm; padding-left: 4mm; position: relative; }
+  .diff li::before { content: ""; position: absolute; left: 0; top: 2.1mm; width: 1.6mm; height: 1.6mm; background: var(--sdg); }
+  .diff b { color: var(--ink); font-weight: 600; }
+  .band img { display: block; margin-top: 3mm; }
+  .big { font-size: 13mm; font-weight: 600; line-height: 1; letter-spacing: -0.02em; margin-top: 3mm; }
+  .chart { display: flex; align-items: flex-end; gap: 1.6mm; height: 22mm; margin-top: 3mm; border-bottom: 0.3mm solid var(--ink); }
+  .chart div { flex: 1; background: var(--sdg); }
+  .chart div.max { background: var(--ink); }
+  .axis { display: flex; gap: 1.6mm; margin-top: 1.2mm; font-size: 3.1mm; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+  .axis span { flex: 1; text-align: center; }
+
+  .sdg { bottom: 27mm; padding-top: 7mm; gap: 7mm; }
+  .sdg .tile { width: 24mm; height: 24mm; padding: 2.2mm 2.6mm; }
+  .sdg .tile b { font-size: 3.4mm; }
+  .sdg .tile span { font-size: 13mm; }
+  .sdg h2 { font-size: 6.4mm; }
+  .sdg p { font-size: 4.4mm; margin-top: 1.4mm; }
+  footer { bottom: 12mm; font-size: 4mm; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>828 metres,<br>standing in the wind.</h1>
+    <p class="lede">We solved the wind around the Burj Khalifa, the tallest building on Earth, from nine directions with the Navier–Stokes equations, to see where it pushes hardest and why.</p>
+  </header>
+
+  <img class="hero" src="img/tower.png" alt="Burj Khalifa coloured by surface pressure, with air paths at four heights">
+  <div class="note left" style="left: -4mm; top: 193mm;"><span class="n">A</span><p><b>The wind hits head-on.</b> Highest pressure, in red.</p></div>
+  <div class="note" style="left: 91mm; top: 260mm;"><span class="n">B</span><p><b>Air speeds round the sides.</b> Pressure drops (blue) and pulls on the walls.</p></div>
+  <div class="note" style="left: 112mm; top: 407mm; width: 86mm;"><span class="n">C</span><p><b>Behind the tower</b> the air slows and swirls: the wake.</p></div>
+
+  <section class="blk" style="left: 206mm; top: 106mm; width: 90mm;">
+    <h3><em>1</em>The ground slows the wind.</h3>
+    <p><span class="m"><i>u</i>(<i>z</i>) ∝ ln((<i>z</i> + <i>z</i>₀) ÷ <i>z</i>₀)</span><br>a logarithm: fast high up, slow near the ground.</p>
+    <img src="img/burj_wind_profile.svg" style="width: 88mm;" alt="Wind speed against height, a log curve">
+  </section>
+  <section class="blk" style="left: 300mm; top: 106mm; width: 90mm;">
+    <h3><em>2</em>So the push grows with height.</h3>
+    <p>The front is pushed in, harder higher up, growing like <span class="m">(<i>u</i> ÷ <i>U</i>)²</span> (dashed). The sides and back are sucked outward.</p>
+    <img src="img/burj_cp_profile.svg" style="width: 88mm;" alt="Pressure coefficient on each face against height">
+  </section>
+
+  <section class="blk" style="left: 206mm; top: 279mm; width: 182mm;">
+    <h3><em>3</em><span class="m" style="font-size: 6mm;"><i>F</i> ∝ <i>v</i>²</span>: double the wind, four times the push.</h3>
+    <img src="img/burj_force_curve.svg" style="width: 182mm;" alt="Push on the tower against wind speed, a parabola through four storms">
+    <p style="margin-top: 1mm;">A category 5 hurricane pushes with 79.2 MN, about the weight of 8,000 tonnes. Turning effect at the base = force × distance: <span style="white-space:nowrap">23.7 GN·m ÷ 79.2 MN = 299 m</span> up the tower.</p>
+  </section>
+
+  <section class="key">
+    <div>
+      <h3>Surface pressure</h3>
+      <div class="bar"></div>
+      <div class="ends"><span>Low: suction</span><span>High: wind hits</span></div>
+    </div>
+    <div>
+      <h3>Air speed</h3>
+      <div class="bar"></div>
+      <div class="ends"><span>Still</span><span>234 km/h</span></div>
+    </div>
+  </section>
+
+  <section class="band">
+    <div>
+      <h3>The same equation, a different job.</h3>
+      <div class="ns">ρ(<span class="gone">∂<i>v</i>/∂<i>t</i></span> + (<i>v</i>·∇)<i>v</i>) = −∇<i>p</i> + <i>μ</i>∇²<i>v</i></div>
+      <p>A steady wind, so the time term drops out. Size of each term near the tower:</p>
+      <div class="terms">
+        <div class="term"><span>Pressure push</span><span class="t" style="width: 100%; background: #D55E00;"></span><span class="v">21.7</span></div>
+        <div class="term"><span>Inertia (<i>v</i>·∇)<i>v</i></span><span class="t" style="width: 73.4%; background: #0072B2;"></span><span class="v">15.9</span></div>
+        <div class="term"><span>Friction</span><span class="t" style="width: 10.8%; background: #B4428E;"></span><span class="v">2.35</span></div>
+      </div>
+      <p style="margin-top: 2mm;">m/s² per kilogram of air. Pressure and inertia balance; friction is ten times smaller.</p>
+    </div>
+    <div>
+      <h3>How a building is different.</h3>
+      <ul class="diff">
+        <li><b>It stands on the ground.</b> A plane flies in even air; a tower meets wind that changes with height.</li>
+        <li><b>It is blunt.</b> Air breaks away at its edges, leaving a big wake. It needs no lift, only to resist the push.</li>
+        <li><b>It is huge.</b> Reynolds number <span style="font-family:'STIX Two Text',serif; white-space:nowrap"><i>Re</i> = <i>VD</i> ÷ <i>ν</i></span>, so the flow is fully turbulent:</li>
+      </ul>
+      <img src="img/burj_reynolds.svg" style="width: 112mm;" alt="Reynolds numbers of the four exhibits on a log scale">
+    </div>
+    <div>
+      <h3>Turn the wind: the push barely changes.</h3>
+      <div class="big">&lt; 6 %</div>
+      <div class="chart" aria-label="Category 5 push from each wind direction, 74.9 to 79.2 MN">
+        <div style="height: 97.0%"></div><div class="max" style="height: 100%"></div><div style="height: 96.6%"></div>
+        <div style="height: 96.7%"></div><div style="height: 98.6%"></div><div style="height: 95.8%"></div>
+        <div style="height: 94.8%"></div><div style="height: 96.7%"></div><div style="height: 94.6%"></div>
+      </div>
+      <div class="axis"><span>0°</span><span>7.5</span><span>15</span><span>22.5</span><span>30</span><span>37.5</span><span>45</span><span>52.5</span><span>60</span></div>
+      <p style="margin-top: 2mm;">Category 5 push from all nine directions: 74.9 to 79.2 MN. The Y-shaped floor plan spreads it evenly.</p>
+    </div>
+  </section>
+
+  <section class="sdg">
+    <div class="tile"><b>SDG</b><span>11</span></div>
+    <div>
+      <h2>Sustainable cities and communities</h2>
+      <p>Make cities inclusive, safe, resilient and sustainable. Knowing the wind’s push lets engineers build towers that stay safe in storms without more steel and concrete than they need.</p>
+    </div>
+  </section>
+
+  <footer>
+    <span>Solved with OpenFOAM, k-ω SST · 9 wind directions, about 216,000 cells each · 180 km/h at the roof, ground roughness 0.5 m</span>
+    <span>NavFlow · NPS International School STEM Exhibition</span>
+  </footer>
+</body>
+</html>

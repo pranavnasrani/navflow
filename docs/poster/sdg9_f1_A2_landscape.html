@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drag is the price of speed</title>
+<link rel="stylesheet" href="sdg.css">
+<style>
+  /* landscape A2: 594 x 420 mm */
+  @page { size: 594mm 420mm; margin: 0; }
+  html, body { width: 594mm; height: 420mm; }
+  :root { --sdg: #FD6925; } /* official SDG 9 orange */
+
+  header { left: 28mm; right: auto; width: 360mm; top: 24mm; }
+  h1 { font-size: 19mm; }
+  .lede { margin-top: 6mm; font-size: 6.4mm; max-width: 350mm; }
+
+  .sdg { left: 414mm; right: 28mm; top: 26mm; bottom: auto; border-top: none; padding-top: 0; align-items: flex-start; gap: 6mm; }
+  .sdg .tile { width: 30mm; height: 30mm; }
+  .sdg .tile span { font-size: 16mm; }
+  .sdg h2 { font-size: 6.6mm; }
+  .sdg p { font-size: 4.6mm; }
+
+  .hero { left: 0; width: 410mm; top: 90mm; }
+
+  /* number badges on the render; the words are in "What you're seeing" */
+  .badge { position: absolute; width: 7.4mm; height: 7.4mm; margin: -3.7mm 0 0 -3.7mm; border-radius: 50%;
+    background: var(--ink); color: #FFFFFF; font-size: 4.2mm; font-weight: 600; display: flex; align-items: center;
+    justify-content: center; box-shadow: 0 0 0 0.9mm #FFFFFF; }
+
+  .facts { position: absolute; left: 414mm; right: 28mm; top: 96mm; }
+  .fact + .fact { margin-top: 10mm; padding-top: 9mm; border-top: 0.4mm solid var(--rule); }
+  .fact .eq { font-family: "STIX Two Text", serif; font-size: 16mm; line-height: 1; white-space: nowrap; }
+  .fact .num { font-size: 16mm; font-weight: 600; line-height: 1; letter-spacing: -0.02em; }
+  .fact h2 { font-size: 6.2mm; font-weight: 600; line-height: 1.2; margin-top: 4mm; }
+  .fact p { font-size: 4.6mm; line-height: 1.4; color: var(--ink-2); margin-top: 2.2mm; }
+
+  .eq .half { display: inline-flex; flex-direction: column; align-items: center; font-size: 0.6em; line-height: 1; vertical-align: 0.45em; margin: 0 0.1em 0 0.06em; }
+  .eq .half .bar { width: 100%; height: 0.07em; background: currentColor; margin: 0.08em 0; }
+  .eq .sb { font-size: 0.5em; font-style: italic; vertical-align: -0.3em; margin-left: 0.04em; }
+  .eq .sp { font-size: 0.55em; vertical-align: 0.75em; margin-left: 0.12em; }
+  .terms { font-size: 4.2mm; color: var(--ink-2); margin-top: 3mm; }
+  .terms b { font-family: "STIX Two Text", serif; font-style: italic; font-weight: 400; color: var(--ink); font-size: 1.15em; }
+  .terms sub { font-size: 0.6em; }
+  table { width: 100%; border-collapse: collapse; margin-top: 4mm; font-size: 4.6mm; font-variant-numeric: tabular-nums; }
+  th { text-align: left; font-weight: 600; color: var(--ink-2); font-size: 3.8mm; padding-bottom: 1.4mm; border-bottom: 0.3mm solid var(--rule); }
+  td { padding: 1.5mm 0; border-bottom: 0.3mm solid #EEEEEE; }
+  th.r, td.r { text-align: right; }
+
+  /* bottom band: three columns */
+  .band { position: absolute; left: 28mm; right: 28mm; top: 292mm; display: grid;
+    grid-template-columns: 1.15fr 1fr 0.85fr; gap: 16mm; border-top: 0.4mm solid var(--rule); padding-top: 9mm; }
+  .band h3.title { font-size: 6.2mm; font-weight: 600; line-height: 1.2; }
+  .seeing { list-style: none; margin-top: 4mm; }
+  .seeing li { display: flex; gap: 3mm; font-size: 4.6mm; line-height: 1.35; margin-top: 2.6mm; }
+  .seeing li span { flex: none; width: 6.2mm; height: 6.2mm; border-radius: 50%; background: var(--ink); color: #FFFFFF;
+    font-size: 3.6mm; font-weight: 600; display: flex; align-items: center; justify-content: center; }
+  .seeing b { font-weight: 600; }
+
+  .cw .num { font-size: 13mm; font-weight: 600; line-height: 1; letter-spacing: -0.02em; margin-top: 3mm; }
+  .chart { display: flex; align-items: flex-end; gap: 1.8mm; height: 24mm; margin-top: 4mm; border-bottom: 0.3mm solid var(--ink); }
+  .chart div { flex: 1; background: var(--sdg); }
+  .chart div.max { background: var(--ink); }
+  .axis { display: flex; gap: 1.8mm; margin-top: 1.4mm; font-size: 3.4mm; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+  .axis span { flex: 1; text-align: center; }
+  .cw p { font-size: 4.4mm; line-height: 1.4; color: var(--ink-2); margin-top: 2.4mm; }
+
+  .band .key { grid-template-columns: 1fr; gap: 7mm; margin-top: 4mm; }
+
+  footer { left: 28mm; right: 28mm; bottom: 14mm; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>Drag is the price of speed.</h1>
+    <p class="lede">At top speed, a Formula 1 car spends most of its engine power just pushing air out of the way. We solved the air around a full-size F1 car at 144 km/h, using the Navier–Stokes equations, with the wind turned through nine crosswind angles.</p>
+  </header>
+
+  <section class="sdg">
+    <div class="tile"><b>SDG</b><span>9</span></div>
+    <div>
+      <h2>Industry, innovation and infrastructure</h2>
+      <p>Build resilient infrastructure, promote inclusive and sustainable industrialisation, and foster innovation. Racing aerodynamics feeds into road cars: less drag means less power, fuel and CO₂.</p>
+    </div>
+  </section>
+
+  <img class="hero" src="img/car.png" alt="Formula 1 car coloured by surface pressure, with air paths coloured by speed">
+  <span class="badge" style="left: 49mm; top: 206mm;">1</span>
+  <span class="badge" style="left: 135mm; top: 196mm;">2</span>
+  <span class="badge" style="left: 261mm; top: 160mm;">3</span>
+  <span class="badge" style="left: 364mm; top: 119mm;">4</span>
+
+  <section class="facts">
+    <div class="fact">
+      <div class="eq"><i>P</i> = <span class="half"><span>1</span><span class="bar"></span><span>2</span></span><i>ρ</i>&#8202;<i>C</i><span class="sb">d</span>&#8202;<i>A</i>&#8202;<i>V</i><span class="sp">3</span></div>
+      <div class="terms"><b>P</b> power · <b>ρ</b> air density · <b>C<sub>d</sub></b> drag coefficient · <b>A</b> front area · <b>V</b> speed</div>
+      <h2>Double the speed, eight times the power.</h2>
+      <table>
+        <tr><th>Speed</th><th class="r">Drag</th><th class="r">Power to push the air</th></tr>
+        <tr><td>100 km/h</td><td class="r">602 N</td><td class="r">17 kW</td></tr>
+        <tr><td>200 km/h</td><td class="r">2,407 N</td><td class="r">134 kW</td></tr>
+        <tr><td>300 km/h</td><td class="r">5,415 N</td><td class="r">451 kW</td></tr>
+      </table>
+      <p>From our result for this car, <span style="white-space:nowrap"><i>C</i><sub>d</sub><i>A</i> = 1.27 m²</span>.</p>
+    </div>
+    <div class="fact">
+      <div class="num">+3.6 %</div>
+      <h2>Cut drag by 10 %, go 3.6 % faster on the same power.</h2>
+      <p>Power grows with <i>V</i>³, so speed grows with the cube root: <span style="white-space:nowrap">(1 ÷ 0.9)<sup>1/3</sup> = 1.036</span>.</p>
+    </div>
+  </section>
+
+  <section class="band">
+    <div>
+      <h3 class="title">What you’re seeing</h3>
+      <ul class="seeing">
+        <li><span>1</span><div><b>Front wing.</b> The air hits head-on: highest pressure, in red.</div></li>
+        <li><span>2</span><div><b>Front tyre.</b> Air races round its edge and the pressure drops, in blue.</div></li>
+        <li><span>3</span><div><b>Rear tyre.</b> Open wheels face the wind directly, so they add drag.</div></li>
+        <li><span>4</span><div><b>The wake.</b> Slow, swirling air behind the car holds it back.</div></li>
+      </ul>
+    </div>
+    <div class="cw">
+      <h3 class="title">A crosswind costs power.</h3>
+      <div class="num">+11 %</div>
+      <div class="chart" aria-label="Drag at nine crosswind angles, 1,187 to 1,389 N">
+        <div style="height: 89.8%"></div><div style="height: 88.8%"></div><div style="height: 88.5%"></div>
+        <div style="height: 85.5%"></div><div style="height: 88.1%"></div><div style="height: 92.2%"></div>
+        <div style="height: 95.7%"></div><div style="height: 96.5%"></div><div class="max" style="height: 100%"></div>
+      </div>
+      <div class="axis"><span>0°</span><span>2°</span><span>4°</span><span>6°</span><span>8°</span><span>10°</span><span>12°</span><span>14°</span><span>16°</span></div>
+      <p>Drag at each crosswind angle: 1,247 N straight on, 1,389 N at 16° (dark). Drag power rises from 49.9 to 55.5 kW.</p>
+    </div>
+    <div class="key">
+      <div>
+        <h3>Surface pressure</h3>
+        <div class="bar"></div>
+        <div class="ends"><span>Low: suction</span><span>High: air hits</span></div>
+      </div>
+      <div>
+        <h3>Air speed</h3>
+        <div class="bar"></div>
+        <div class="ends"><span>Still</span><span>187 km/h</span></div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <span>Solved with OpenFOAM, k-ω SST · 9 crosswind angles, about 390,000 cells each · 144 km/h over a moving floor</span>
+    <span>NavFlow · NPS International School STEM Exhibition</span>
+  </footer>
+</body>
+</html>

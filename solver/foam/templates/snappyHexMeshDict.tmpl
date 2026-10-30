@@ -1,0 +1,137 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      snappyHexMeshDict;
+}
+
+castellatedMesh true;
+snap            true;
+addLayers       true;
+
+geometry
+{
+    model.stl
+    {
+        type    triSurfaceMesh;
+        name    model;
+    }
+
+    // Refinement box over the model and its wake: 0.2 D upstream of the nose to 3 D behind the tail,
+    // model width and height plus 0.5 D each side (D = longest side of the model).
+    wake
+    {
+        type    box;
+        min     ($wake_xmin $wake_ymin $wake_zmin);
+        max     ($wake_xmax $wake_ymax $wake_zmax);
+    }
+}
+
+castellatedMeshControls
+{
+    maxLocalCells       $max_cells;
+    maxGlobalCells      $max_cells;
+    minRefinementCells  10;
+    maxLoadUnbalance    0.10;
+    nCellsBetweenLevels 3;
+
+    features
+    (
+        {
+            file    "model.eMesh";
+            level   $feature_level;
+        }
+    );
+
+    refinementSurfaces
+    {
+        model
+        {
+            level   ($surface_min $surface_max);
+
+            patchInfo
+            {
+                type    wall;
+                inGroups (modelGroup);
+            }
+        }
+    }
+
+    resolveFeatureAngle 30;
+
+    refinementRegions
+    {
+        wake
+        {
+            mode    inside;
+            levels  ((1E15 $wake_level));
+        }
+    }
+
+    // A point in the air, inside the first cells at the upstream/lower corner of the tunnel
+    // (offsets 1.37 h, 1.41 h, 1.73 h so it never lies on a cell face).
+    locationInMesh      ($loc_x $loc_y $loc_z);
+
+    allowFreeStandingZoneFaces true;
+}
+
+snapControls
+{
+    nSmoothPatch    3;
+    tolerance       2.0;
+    nSolveIter      30;
+    nRelaxIter      5;
+    nFeatureSnapIter 10;
+    implicitFeatureSnap false;
+    explicitFeatureSnap true;
+    multiRegionFeatureSnap false;
+}
+
+addLayersControls
+{
+    relativeSizes       true;
+
+    layers
+    {
+        "model.*"
+        {
+            nSurfaceLayers  $n_layers;
+        }
+    }
+
+    // Each layer is 1.2 times thicker than the one below it (a geometric progression, IGCSE 0606).
+    expansionRatio      1.2;
+    finalLayerThickness 0.4;
+    minThickness        0.1;
+
+    nGrow               0;
+    featureAngle        60;
+    slipFeatureAngle    30;
+    nRelaxIter          3;
+    nSmoothSurfaceNormals 1;
+    nSmoothNormals      3;
+    nSmoothThickness    10;
+    maxFaceThicknessRatio 0.5;
+    maxThicknessToMedialRatio 0.3;
+    minMedialAxisAngle  90;
+    nBufferCellsNoExtrude 0;
+    nLayerIter          50;
+}
+
+meshQualityControls
+{
+    #includeEtc "caseDicts/meshQualityDict"
+
+    nSmoothScale    4;
+    errorReduction  0.75;
+}
+
+writeFlags
+(
+    scalarLevels
+    layerSets
+    layerFields
+);
+
+mergeTolerance 1e-6;

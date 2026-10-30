@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="NavFlow">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="color-scheme" content="light">
+<meta name="theme-color" content="#ECEEF1">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icon-180.png">
+<link rel="icon" type="image/png" href="/icon-192.png">
+<title>NavFlow Remote</title>
+<style>
+  /* Same palette and type as the exhibition screens (app/monitor_window.py): light panel, ink, one dark pill. */
+  :root {
+    --bg: #ECEEF1; --card: #FFFFFF; --ink: #1D232B; --on-ink: #FFFFFF; --muted: #5B6573; --rule: #C7CDD5;
+    --track: #D3D9E0; --ok: #16A34A; --warn: #C2410C;
+    --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+  }
+  :root[data-theme="dark"] {   /* the dark theme of the screens (app/theme.py) */
+    --bg: #0E1319; --card: #161C24; --ink: #E8EDF3; --on-ink: #10151B; --muted: #97A3B2; --rule: #2B3440;
+    --track: #2A333E; --ok: #4ADE80; --warn: #FB923C;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--ink);
+    font: 18px/1.3 var(--sans); -webkit-font-smoothing: antialiased;
+    -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+    overscroll-behavior: none; touch-action: manipulation; }
+  main { max-width: 1000px; margin: 0 auto; display: grid; gap: 18px;
+    padding: max(18px, env(safe-area-inset-top)) max(18px, env(safe-area-inset-right))
+             max(22px, env(safe-area-inset-bottom)) max(18px, env(safe-area-inset-left)); }
+
+  /* views: the same three tabs as the screens, the active one a dark pill */
+  main > * { min-width: 0; }
+  header { display: flex; align-items: center; gap: 12px; }
+  #views { flex: 1; min-width: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; padding: 6px;
+    background: var(--card); border: 1px solid var(--rule); border-radius: 20px; }
+  .view { min-height: 64px; border: 0; border-radius: 14px; background: transparent; color: var(--muted);
+    font: 600 clamp(.82rem, 3.4vw, 1.05rem)/1.15 var(--sans); padding: 8px 4px; }
+  .view[aria-pressed=true] { background: var(--ink); color: var(--on-ink); }
+  #link { flex: none; width: 14px; height: 14px; border-radius: 50%; background: var(--ok); }
+  #link.bad { background: var(--warn); }
+  #theme { flex: none; width: 52px; height: 52px; border-radius: 50%; border: 1px solid var(--rule); background: var(--card);
+    color: var(--ink); display: grid; place-items: center; padding: 0; }
+  #theme svg { width: 26px; height: 26px; }
+  #theme .moon { display: block; } #theme .sun { display: none; }
+  :root[data-theme="dark"] #theme .moon { display: none; } :root[data-theme="dark"] #theme .sun { display: block; }
+
+  section { background: var(--card); border: 1px solid var(--rule); border-radius: 26px; padding: 22px; }
+  h2 { margin: 0 0 14px; font: 600 1.05rem/1.2 var(--sans); color: var(--muted); }
+
+  /* wind direction: a 270-degree dial, the number in the middle */
+  #dial-wrap { position: relative; width: min(74vw, 400px); margin: 0 auto; touch-action: none; }
+  #dial { width: 100%; height: auto; display: block; touch-action: none; cursor: grab; overflow: visible; }
+  #track { stroke: var(--track); } #fill { stroke: var(--ink); } #handle { fill: var(--card); stroke: var(--ink); }
+  #dial-readout { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none;
+    font: 700 clamp(3rem, 12vw, 4.6rem)/1 var(--sans); font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+  #dial-readout small { font-size: .38em; font-weight: 600; color: var(--muted); margin-left: .12em; }
+
+  /* smoke height: ten buttons, like the macropad */
+  #wands { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
+  .wand { aspect-ratio: 1; border-radius: 18px; border: 1px solid var(--rule); background: var(--bg);
+    color: var(--ink); font: 700 1.6rem/1 var(--sans); font-variant-numeric: tabular-nums; }
+  .wand[aria-pressed=true] { background: var(--ink); border-color: var(--ink); color: var(--on-ink); }
+
+  @media (max-width: 480px) { section { padding: 16px; } #wands { gap: 8px; } }
+  @media (min-width: 800px) and (orientation: landscape) {
+    main { grid-template-columns: 1fr 1fr; align-items: start; }
+    header { grid-column: 1 / -1; }
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .view, .wand { transition: background .12s, color .12s, border-color .12s; }
+    .view:active, .wand:active { transform: scale(.97); }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div id="views" role="group" aria-label="View">
+      <button class="view" data-view="0" aria-pressed="false">Velocity &amp; pressure</button>
+      <button class="view" data-view="1" aria-pressed="false">Navier&ndash;Stokes</button>
+      <button class="view" data-view="2" aria-pressed="false">Turbulence</button>
+    </div>
+    <span id="link" role="status" aria-label="connected"></span>
+    <button id="theme" type="button" aria-label="Switch between light and dark">
+      <svg class="moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.5 14.2A8.5 8.5 0 0 1 9.8 3.5a8.5 8.5 0 1 0 10.7 10.7z"/></svg>
+      <svg class="sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.4M12 19.1v2.4M2.5 12h2.4M19.1 12h2.4M5.3 5.3l1.7 1.7M17 17l1.7 1.7M5.3 18.7 7 17M17 7l1.7-1.7"/></svg>
+    </button>
+  </header>
+
+  <section>
+    <h2>Wind direction</h2>
+    <div id="dial-wrap">
+      <svg id="dial" viewBox="0 0 240 240" role="slider" aria-label="Wind direction" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <defs><filter id="lift" x="-30%" y="-30%" width="160%" height="170%">
+          <feDropShadow dx="0" dy="3" stdDeviation="3" flood-color="#000" flood-opacity=".28"/></filter></defs>
+        <path id="track" d="" fill="none" stroke-width="14" stroke-linecap="round"/>
+        <path id="fill" d="" fill="none" stroke-width="14" stroke-linecap="round"/>
+        <circle id="handle" r="19" stroke-width="4" filter="url(#lift)"/>
+      </svg>
+      <div id="dial-readout"><span><span id="dial-num">0</span><small>%</small></span></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Smoke height</h2>
+    <div id="wands" role="group" aria-label="Smoke height">
+      <button class="wand" data-wand="1" aria-pressed="false">1</button>
+      <button class="wand" data-wand="2" aria-pressed="false">2</button>
+      <button class="wand" data-wand="3" aria-pressed="false">3</button>
+      <button class="wand" data-wand="4" aria-pressed="false">4</button>
+      <button class="wand" data-wand="5" aria-pressed="false">5</button>
+      <button class="wand" data-wand="6" aria-pressed="false">6</button>
+      <button class="wand" data-wand="7" aria-pressed="false">7</button>
+      <button class="wand" data-wand="8" aria-pressed="false">8</button>
+      <button class="wand" data-wand="9" aria-pressed="false">9</button>
+      <button class="wand" data-wand="10" aria-pressed="false">10</button>
+    </div>
+  </section>
+</main>
+
+<script>
+"use strict";
+(function () {
+  var SEND_INTERVAL_MS = 50;   // at most 20 commands per second per control
+  var POLL_MS = 400;
+  var HOLD_MS = 800;           // after a touch, ignore polled state so the control does not jump back
+
+  // Dial geometry: a 270-degree sweep, 0 at the top, gap at the bottom.
+  // knob = (angle + 135) / 270 is a straight line (IGCSE 0606 linear interpolation).
+  var CX = 120, CY = 120, R = 100, MIN_A = -135, MAX_A = 135;
+
+  var $ = function (id) { return document.getElementById(id); };
+  var dial = $("dial"), linkEl = $("link");
+  var knob = 0, dragging = false, lastTouch = 0, failures = 0, dark = false;
+  var HEADERS = { "ngrok-skip-browser-warning": "1" };   // ngrok's free tier otherwise puts a notice page in front of the API
+
+  function point(deg, r) {
+    var a = deg * Math.PI / 180;
+    return [CX + r * Math.sin(a), CY - r * Math.cos(a)];
+  }
+  function arc(fromDeg, toDeg) {
+    var p = point(fromDeg, R), q = point(toDeg, R);
+    var large = (toDeg - fromDeg) > 180 ? 1 : 0;
+    return "M" + p[0].toFixed(2) + " " + p[1].toFixed(2) + " A" + R + " " + R + " 0 " + large + " 1 " + q[0].toFixed(2) + " " + q[1].toFixed(2);
+  }
+  function drawDial() {
+    var a = MIN_A + knob * (MAX_A - MIN_A);
+    $("track").setAttribute("d", arc(MIN_A, MAX_A));
+    $("fill").setAttribute("d", knob > 0.002 ? arc(MIN_A, a) : "");
+    var h = point(a, R);
+    $("handle").setAttribute("cx", h[0]); $("handle").setAttribute("cy", h[1]);
+    var pct = Math.round(knob * 100);
+    $("dial-num").textContent = pct;
+    dial.setAttribute("aria-valuenow", pct);
+  }
+
+  // Throttled sender: sends the newest value, at most once per SEND_INTERVAL_MS per kind.
+  var senders = {};
+  function send(kind, value) {
+    var s = senders[kind] || (senders[kind] = { last: 0, timer: null, pending: null });
+    s.pending = value;
+    var wait = SEND_INTERVAL_MS - (Date.now() - s.last);
+    if (wait <= 0) { flush(kind); }
+    else if (!s.timer) { s.timer = setTimeout(function () { flush(kind); }, wait); }
+  }
+  function flush(kind) {
+    var s = senders[kind];
+    if (s.timer) { clearTimeout(s.timer); s.timer = null; }
+    if (s.pending === null) return;
+    var value = s.pending; s.pending = null; s.last = Date.now();
+    var ctl = new AbortController();
+    var t = setTimeout(function () { ctl.abort(); }, 2000);
+    fetch("/cmd", { method: "POST", headers: { "Content-Type": "application/json", "ngrok-skip-browser-warning": "1" },
+                    body: JSON.stringify({ kind: kind, value: value }), signal: ctl.signal })
+      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); setOnline(true); })
+      .catch(function () { setOnline(false); })
+      .then(function () { clearTimeout(t); });
+  }
+
+  function setOnline(ok) {
+    failures = ok ? 0 : failures + 1;
+    if (ok) { linkEl.className = ""; linkEl.setAttribute("aria-label", "connected"); }
+    else if (failures >= 2) { linkEl.className = "bad"; linkEl.setAttribute("aria-label", "connection lost, retrying"); }
+  }
+
+  // ---- dial: pointer events cover finger, Apple Pencil and mouse ----
+  function knobFromEvent(e) {
+    var rect = dial.getBoundingClientRect();
+    var dx = e.clientX - (rect.left + rect.width / 2);
+    var dy = e.clientY - (rect.top + rect.height / 2);
+    var a = Math.atan2(dx, -dy) * 180 / Math.PI;      // 0 at top, clockwise positive, -180..180
+    if (a > MAX_A) a = MAX_A;                         // in the gap: stick to the nearer end
+    if (a < MIN_A) a = MIN_A;                         // (lower-left -> 0%, lower-right -> 100%)
+    return (a - MIN_A) / (MAX_A - MIN_A);
+  }
+  function dialMove(e) {
+    var k = knobFromEvent(e);
+    // Never jump across the gap in one move (e.g. 100% straight to 0%): stay at the end reached.
+    if (Math.abs(k - knob) > 0.6) k = knob > 0.5 ? 1 : 0;
+    knob = k; drawDial(); send("knob", k);
+  }
+  dial.addEventListener("pointerdown", function (e) {
+    dragging = true; lastTouch = Date.now();
+    try { dial.setPointerCapture(e.pointerId); } catch (_) {}
+    var k = knobFromEvent(e);
+    knob = k; drawDial(); send("knob", k);
+    e.preventDefault();
+  });
+  dial.addEventListener("pointermove", function (e) { if (dragging) { lastTouch = Date.now(); dialMove(e); e.preventDefault(); } });
+  function dialEnd() { if (dragging) { dragging = false; lastTouch = Date.now(); flush("knob"); } }
+  dial.addEventListener("pointerup", dialEnd);
+  dial.addEventListener("pointercancel", dialEnd);
+  dial.addEventListener("lostpointercapture", dialEnd);
+
+  // ---- smoke height: 1-10 on screen, 0-9 on the wire ----
+  var wandBtns = Array.prototype.slice.call(document.querySelectorAll(".wand"));
+  function showWand(n) {
+    wandBtns.forEach(function (b) { b.setAttribute("aria-pressed", String(parseInt(b.dataset.wand, 10) === n)); });
+  }
+  wandBtns.forEach(function (b) {
+    b.addEventListener("click", function () {
+      var n = parseInt(b.dataset.wand, 10);
+      lastTouch = Date.now(); showWand(n); send("wand", n - 1);
+    });
+  });
+
+  // ---- views ----
+  var viewBtns = Array.prototype.slice.call(document.querySelectorAll(".view"));
+  function showView(v) {
+    viewBtns.forEach(function (b) { b.setAttribute("aria-pressed", String(parseInt(b.dataset.view, 10) === v)); });
+  }
+  viewBtns.forEach(function (b) {
+    b.addEventListener("click", function () {
+      var v = parseInt(b.dataset.view, 10);
+      lastTouch = Date.now(); showView(v); send("view", v);
+    });
+  });
+
+  // ---- theme: follows the host, which switches every screen together; remembered so a reload does not flash ----
+  function setTheme(isDark, tell) {
+    if (isDark === dark && !tell) return;
+    dark = isDark;
+    document.documentElement.dataset.theme = dark ? "dark" : "light";
+    document.querySelector('meta[name="theme-color"]').setAttribute("content", dark ? "#0E1319" : "#ECEEF1");
+    document.querySelector('meta[name="color-scheme"]').setAttribute("content", dark ? "dark" : "light");
+    try { localStorage.setItem("navflow-theme", dark ? "dark" : "light"); } catch (_) {}
+    if (tell) { lastTouch = Date.now(); send("theme", dark ? 1 : 0); }
+  }
+  $("theme").addEventListener("click", function () { setTheme(!dark, true); });
+  try { if (localStorage.getItem("navflow-theme") === "dark") setTheme(true, false); } catch (_) {}
+
+  // ---- polling: keep the page in step with the macropad, keyboard and idle show ----
+  function poll() {
+    var idle = !dragging && Date.now() - lastTouch > HOLD_MS;
+    var ctl = new AbortController();
+    var t = setTimeout(function () { ctl.abort(); }, 2000);
+    fetch("/state", { cache: "no-store", headers: HEADERS, signal: ctl.signal })
+      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(function (s) {
+        setOnline(true);
+        if (!idle) return;
+        showWand(s.wand + 1);
+        knob = Math.min(1, Math.max(0, s.knob)); drawDial();
+        showView(s.view);
+        setTheme(!!s.dark, false);
+      })
+      .catch(function () { setOnline(false); })
+      .then(function () { clearTimeout(t); setTimeout(poll, POLL_MS); });
+  }
+
+  drawDial(); showView(0); showWand(5);
+  poll();
+})();
+</script>
+</body>
+</html>

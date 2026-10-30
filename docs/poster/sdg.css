@@ -1,0 +1,52 @@
+/* Shared by the two SDG posters (A2 portrait). Same type system as navier_stokes_A2.html:
+   Avenir Next for words, STIX Two for maths, one accent per poster (its official SDG colour). */
+@page { size: 420mm 594mm; margin: 0; }
+:root {
+  --ink: #141414;
+  --ink-2: #555555;
+  --rule: #D8D8D8;
+  --paper: #FFFFFF;
+  --bands: #0000ff 0% 5%, #0036ff 5% 10%, #006bff 10% 15%, #00a1ff 15% 20%, #00d7ff 20% 25%, #00fff2 25% 30%,
+           #00ffbc 30% 35%, #00ff86 35% 40%, #00ff51 40% 45%, #00ff1b 45% 50%, #1bff00 50% 55%, #51ff00 55% 60%,
+           #86ff00 60% 65%, #bcff00 65% 70%, #f2ff00 70% 75%, #ffd700 75% 80%, #ffa100 80% 85%, #ff6b00 85% 90%,
+           #ff3600 90% 95%, #ff0000 95% 100%;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width: 420mm; height: 594mm; background: var(--paper); }
+body {
+  color: var(--ink); font-family: "Avenir Next", "Avenir", sans-serif;
+  -webkit-print-color-adjust: exact; print-color-adjust: exact;
+  position: relative; overflow: hidden;
+}
+.math { font-family: "STIX Two Text", "STIXGeneral", serif; }
+i { font-style: italic; }
+
+header { position: absolute; left: 32mm; right: 32mm; top: 34mm; }
+h1 { font-weight: 600; font-size: 21mm; line-height: 1.02; letter-spacing: -0.02em; }
+.lede { margin-top: 8mm; font-size: 7.4mm; line-height: 1.35; color: var(--ink-2); max-width: 300mm; }
+
+.hero { position: absolute; display: block; }
+
+/* the one big idea, in maths */
+.idea .eq { font-family: "STIX Two Text", serif; font-size: 24mm; line-height: 1; white-space: nowrap; }
+.idea h2 { font-size: 8.6mm; font-weight: 600; line-height: 1.2; margin-top: 9mm; }
+.idea p { font-size: 6.2mm; line-height: 1.4; color: var(--ink-2); margin-top: 3.5mm; }
+
+/* how to read the colours */
+.key { display: grid; grid-template-columns: 1fr 1fr; gap: 12mm; }
+.key h3 { font-size: 5mm; font-weight: 600; }
+.key .bar { height: 5mm; margin-top: 2.5mm; background: linear-gradient(90deg, var(--bands)); }
+.key .ends { display: flex; justify-content: space-between; font-size: 4.4mm; color: var(--ink-2); margin-top: 1.8mm; }
+
+/* SDG block: the official colour and number, then the goal in words */
+.sdg { position: absolute; left: 32mm; right: 32mm; bottom: 46mm; display: flex; align-items: center; gap: 9mm;
+  border-top: 0.4mm solid var(--rule); padding-top: 11mm; }
+.sdg .tile { width: 34mm; height: 34mm; background: var(--sdg); color: #FFFFFF; display: flex; flex-direction: column;
+  justify-content: space-between; padding: 3mm 3.4mm; flex: none; }
+.sdg .tile b { font-size: 4.4mm; font-weight: 700; letter-spacing: 0.04em; }
+.sdg .tile span { font-size: 19mm; font-weight: 700; line-height: 0.8; }
+.sdg h2 { font-size: 8mm; font-weight: 600; line-height: 1.15; }
+.sdg p { font-size: 5.8mm; line-height: 1.35; color: var(--ink-2); margin-top: 2mm; }
+
+footer { position: absolute; left: 32mm; right: 32mm; bottom: 22mm; display: flex; justify-content: space-between;
+  font-size: 4.6mm; color: var(--ink-2); letter-spacing: 0.01em; }

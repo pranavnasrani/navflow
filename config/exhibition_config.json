@@ -1,15 +1,30 @@
 {
-  "wind_tunnel": {
-    "dimensions": [2.0, 1.0, 1.0],
-    "pipe_radius": 0.08,
-    "pipe_y_center": 0.5,
-    "z_steps": [
-      0.10, 0.18, 0.27, 0.36, 0.45,
-      0.55, 0.64, 0.73, 0.82, 0.90
+  "openfoam": {
+    "image": "opencfd/openfoam-default:2512",
+    "volume": "navflow-cases",
+    "n_procs": 4,
+    "max_iterations": 1000,
+    "preview_iterations": 500,
+    "min_iterations": 200,
+    "convergence_window": 50,
+    "convergence_tolerance": 0.002,
+    "write_interval": 50,
+    "average_window": 100,
+    "domain_factors": {
+      "upstream": 3,
+      "downstream": 8,
+      "lateral": 3,
+      "top": 3
+    },
+    "base_cells_per_size": 6,
+    "surface_refinement": [
+      4,
+      5
     ],
-    "wind_speeds": [10.0, 20.0, 30.0, 40.0, 50.0],
-    "air_density_kg_m3": 1.225,
-    "kinematic_viscosity_m2_s": 1.5e-5
+    "wake_refinement": 2,
+    "n_layers": 3,
+    "wand_count": 10,
+    "seeds_per_wand": 24
   },
   "objects": [
     {
@@ -19,10 +34,48 @@
       "monitor_index": 0,
       "color": "#00E5FF",
       "sustainability_focus": "Induced Drag Reduction & Jet Fuel / CO2 Conservation",
-      "baseline_drag_power_kw": 420.0,
       "fuel_burn_factor_l_per_kwh": 0.28,
       "co2_kg_per_l_fuel": 2.52,
-      "description": "Streamlined laminar airfoil profile. Moving the air jet across the wing demonstrates how smooth airflow generates lift while minimizing wake turbulence and fuel consumption."
+      "description": "Streamlined commercial airliner. Move the smoke wand along the fuselage and wing and turn the knob to change the angle of attack: smooth airflow generates lift, while a steeper angle thickens the wake and raises drag, fuel burn and CO2.",
+      "cfd": {
+        "speed_m_s": 102.0,
+        "real_size_m": 72.7,
+        "size_axis": "x",
+        "base_rotation_deg": [
+          0,
+          0,
+          90
+        ],
+        "surface_refinement": [
+          6,
+          7
+        ],
+        "rotation_axis": "y",
+        "directions_deg": [
+          0,
+          2,
+          4,
+          6,
+          8,
+          10,
+          12,
+          14,
+          16
+        ],
+        "direction_label": "Angle of attack",
+        "floor": "none",
+        "density_kg_m3": 1.225,
+        "kinematic_viscosity_m2_s": 1.5e-05,
+        "cruise": {
+          "density_kg_m3": 0.364,
+          "speed_m_s": 250.0,
+          "altitude_km": 11,
+          "mass_kg": 500000
+        },
+        "widgets": [
+          "fuel"
+        ]
+      }
     },
     {
       "id": "f1_car",
@@ -31,10 +84,39 @@
       "monitor_index": 1,
       "color": "#FF1744",
       "sustainability_focus": "Frontal Surface Area Optimization & Aerodynamic Efficiency",
-      "baseline_drag_power_kw": 310.0,
       "fuel_burn_factor_l_per_kwh": 0.35,
       "co2_kg_per_l_fuel": 2.31,
-      "description": "High-downforce open-wheel racer. Demonstrates how managing frontal stagnation zones and diffuser flow cuts drag power dramatically while maintaining cornering grip."
+      "description": "High-downforce open-wheel racer. Demonstrates how managing frontal stagnation zones and diffuser flow cuts drag power dramatically while maintaining cornering grip.",
+      "cfd": {
+        "speed_m_s": 40.0,
+        "real_size_m": 5.4,
+        "size_axis": "x",
+        "base_rotation_deg": [
+          0,
+          0,
+          -90
+        ],
+        "rotation_axis": "z",
+        "directions_deg": [
+          0,
+          2,
+          4,
+          6,
+          8,
+          10,
+          12,
+          14,
+          16
+        ],
+        "direction_label": "Crosswind (yaw)",
+        "floor": "moving",
+        "density_kg_m3": 1.225,
+        "kinematic_viscosity_m2_s": 1.5e-05,
+        "widgets": [
+          "fuel",
+          "speed"
+        ]
+      }
     },
     {
       "id": "building",
@@ -43,41 +125,83 @@
       "monitor_index": 2,
       "color": "#FFC400",
       "sustainability_focus": "Vortex Shedding Mitigation & Embodied Material Savings",
-      "baseline_drag_power_kw": 650.0,
-      "fuel_burn_factor_l_per_kwh": 0.40,
+      "fuel_burn_factor_l_per_kwh": 0.4,
       "co2_kg_per_l_fuel": 2.65,
-      "description": "Tall aerodynamic architectural structure. Demonstrates how high-altitude wind pressure induces vortex shedding, and how aerodynamic tapering reduces structural steel and HVAC wind infiltration."
+      "description": "Tall aerodynamic architectural structure. Demonstrates how high-altitude wind pressure induces vortex shedding, and how aerodynamic tapering reduces structural steel and HVAC wind infiltration.",
+      "cfd": {
+        "speed_m_s": 50.0,
+        "real_size_m": 828.0,
+        "size_axis": "z",
+        "base_rotation_deg": [
+          0,
+          0,
+          0
+        ],
+        "rotation_axis": "z",
+        "directions_deg": [
+          0,
+          7.5,
+          15,
+          22.5,
+          30,
+          37.5,
+          45,
+          52.5,
+          60
+        ],
+        "direction_label": "Wind direction",
+        "floor": "rough",
+        "density_kg_m3": 1.225,
+        "kinematic_viscosity_m2_s": 1.5e-05,
+        "abl_z0_m": 0.5,
+        "widgets": [
+          "wind_load"
+        ]
+      },
+      "info_card": "Earthquakes and tsunamis are structural and water problems, not airflow problems. This tower is tested for wind only: a different set of equations and a different kind of engineering model is needed for ground shaking or flooding."
     },
     {
       "id": "human",
+      "display": false,
       "display_name": "Bluff Body (Human Form)",
       "category": "Baseline Benchmark",
       "monitor_index": 3,
       "color": "#76FF03",
       "sustainability_focus": "High-Drag Separation vs. Engineered Streamlining",
-      "baseline_drag_power_kw": 580.0,
       "fuel_burn_factor_l_per_kwh": 0.38,
       "co2_kg_per_l_fuel": 2.45,
-      "description": "Non-streamlined bluff body. Demonstrates massive boundary layer separation, large turbulent wake eddies, and severe pressure drag compared to engineered shapes."
+      "description": "Non-streamlined bluff body. Demonstrates massive boundary layer separation, large turbulent wake eddies, and severe pressure drag compared to engineered shapes.",
+      "cfd": {
+        "speed_m_s": 10.0,
+        "real_size_m": 1.75,
+        "size_axis": "z",
+        "base_rotation_deg": [
+          0,
+          0,
+          0
+        ],
+        "rotation_axis": "z",
+        "directions_deg": [
+          0,
+          22.5,
+          45,
+          67.5,
+          90,
+          112.5,
+          135,
+          157.5,
+          180
+        ],
+        "direction_label": "Body angle to wind",
+        "floor": "slip",
+        "density_kg_m3": 1.225,
+        "kinematic_viscosity_m2_s": 1.5e-05,
+        "widgets": []
+      }
     }
   ],
   "controls": {
-    "z_step_keys": ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"],
-    "z_step_up_keys": ["Up", "w", "W"],
-    "z_step_down_keys": ["Down", "s", "S"],
-    "velocity_increase_keys": ["Right", "d", "D", "+", "="],
-    "velocity_decrease_keys": ["Left", "a", "A", "-", "_"],
-    "view_toggle_key": "Tab",
-    "reset_camera_key": "r",
-    "quit_key": "Escape"
-  },
-  "solver_defaults": {
-    "grid_nx": 80,
-    "grid_ny": 40,
-    "grid_nz": 40,
-    "max_poisson_iterations": 60,
-    "poisson_tolerance": 1e-4,
-    "time_step_dt": 0.005,
-    "precompute_steps": 25
+    "remote_port": 8765,
+    "knob_step": 0.03125
   }
 }

@@ -1,0 +1,23 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      surfaceFeatureExtractDict;
+}
+
+model.stl
+{
+    extractionMethod    extractFromSurface;
+
+    // Edges whose neighbouring face normals meet at less than this angle (degrees) are features.
+    includedAngle       150;
+
+    subsetFeatures
+    {
+        nonManifoldEdges    no;
+        openEdges           yes;
+    }
+
+    writeObj            no;
+}

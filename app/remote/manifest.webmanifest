@@ -1,0 +1,16 @@
+{
+  "id": "/",
+  "name": "NavFlow Remote",
+  "short_name": "NavFlow",
+  "description": "Remote control for the NavFlow Navier-Stokes exhibition screens",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#ECEEF1",
+  "theme_color": "#ECEEF1",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

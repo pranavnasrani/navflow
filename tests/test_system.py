@@ -1,9 +1,9 @@
 """
 Unit and integration test suite for the Navier-Stokes Exhibition System.
 Tests:
-1. ObjectStateManager RAM loading and <1ms state retrieval
-2. IGCSE 0606 Linear Interpolation between wind speeds
-3. ExhibitionInputController macropad event handling
+1. ObjectStateManager (v2 cache) RAM loading and <1ms state retrieval
+2. IGCSE 0606 Linear Interpolation between wind directions
+3. ExhibitionInputController macropad event handling (wand, knob, view)
 4. Custom 3D Navier-Stokes solver divergence-free condition
 """
 
@@ -17,60 +17,273 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import numpy as np
+import pytest
+from PySide6.QtCore import QEvent, Qt
+from PySide6.QtGui import QKeyEvent
+
 from app.state_manager import ObjectStateManager
 from app.input_controller import ExhibitionInputController
+from solver.foam.settings import load_settings
 from solver.navier_stokes_3d import NavierStokes3DSolver
+from tests.fake_cache import write_fake_cache
 
 
-def test_state_manager():
-    print("Testing ObjectStateManager...")
-    for obj_id in ["airplane", "f1_car", "building", "human"]:
-        mgr = ObjectStateManager(obj_id=obj_id, cache_dir="assets/cache")
+def _object_config(obj_id: str) -> dict:
+    """The object's raw config entry (including its `cfd` block), as the importer stores it."""
+    _, _, raw = load_settings()
+    return next(o for o in raw["objects"] if o["id"] == obj_id)
 
-        # Benchmark retrieval speed
+
+@pytest.fixture
+def manager(tmp_path):
+    write_fake_cache(tmp_path / "f1_car_states.npz", _object_config("f1_car"))
+    return ObjectStateManager("f1_car", cache_dir=tmp_path)
+
+
+def _knob_between(mgr, d_lo: int, d_hi: int, frac: float = 0.5) -> float:
+    """Knob value whose direction lies `frac` of the way from direction d_lo to d_hi."""
+    d = mgr.directions_deg
+    target = d[d_lo] + frac * (d[d_hi] - d[d_lo])
+    return float((target - d[0]) / (d[-1] - d[0]))
+
+
+def test_lookup_under_1ms(manager):
+    knob = _knob_between(manager, 2, 3)
+    manager.get_state(4, knob)  # warm-up
+    times = []
+    for _ in range(200):
         t0 = time.perf_counter()
-        state = mgr.get_state(z_step_index=1, wind_speed=30.0)
-        dt_ms = (time.perf_counter() - t0) * 1000.0
-
-        assert state is not None
-        assert "metrics" in state
-        assert "surface_pressure" in state
-        assert "streamlines" in state
-        print(f" -> [{obj_id}] State retrieval time: {dt_ms:.3f} ms (Target: < 1.0 ms)")
-
-        # Test interpolation at V = 25.0 m/s (halfway between precomputed V=20 and V=30)
-        s_20 = mgr.get_state(z_step_index=1, wind_speed=20.0)
-        s_25 = mgr.get_state(z_step_index=1, wind_speed=25.0)
-        s_30 = mgr.get_state(z_step_index=1, wind_speed=30.0)
-
-        p_20 = np.mean(s_20["surface_pressure"])
-        p_25 = np.mean(s_25["surface_pressure"])
-        p_30 = np.mean(s_30["surface_pressure"])
-
-        expected_25 = 0.5 * (p_20 + p_30)
-        assert np.isclose(p_25, expected_25, atol=1e-5), f"Linear interpolation failed: {p_25} vs {expected_25}"
+        manager.get_state(4, knob)
+        times.append((time.perf_counter() - t0) * 1000.0)
+    median_ms = float(np.median(times))
+    print(f" -> median state lookup: {median_ms:.3f} ms (target < 1.0 ms)")
+    assert median_ms < 1.0
 
 
-def test_input_controller():
-    print("\nTesting ExhibitionInputController...")
-    ctrl = ExhibitionInputController(total_z_steps=10, min_speed=10.0, max_speed=50.0)
+def test_interpolation_between_directions(manager):
+    # IGCSE 0606: halfway between directions 2 and 3, t = 0.5, so y = 0.5*2 + 0.5*3 = 2.5 ...
+    state = manager.get_state(0, _knob_between(manager, 2, 3))
+    assert np.isclose(state["surface_pressure"].mean(), 2.5, atol=1e-5)
+    # ... and the telemetry blends the same way (drag force is 100 + d).
+    assert np.isclose(state["metrics"]["drag_force_n"], 102.5)
+    assert np.isclose(state["metrics"]["drag_coefficient_cd"], 0.3 + 0.01 * 2.5)
+    # t = 0.25 -> 0.75*2 + 0.25*3
+    quarter = manager.get_state(0, _knob_between(manager, 2, 3, 0.25))
+    assert np.isclose(quarter["surface_pressure"].mean(), 2.25, atol=1e-5)
+    # Non-numeric metrics are passed through, never blended.
+    assert state["metrics"]["converged"] is True
+    assert state["metrics"]["filled_from"] is None
+    assert state["filled"] is False
+    # Blended wind vector is a unit vector; N-S terms blend numerically.
+    assert np.isclose(np.linalg.norm(state["wind_vector"]), 1.0)
+    assert np.isclose(state["ns_terms"]["pressure"], 2.0)
+    assert state["wind_speed"] == manager.wind_speed == 40.0
 
-    received_events = []
-    ctrl.state_changed.connect(lambda z, v: received_events.append((z, v)))
 
-    # Test Z-step button jump
-    ctrl.set_z_step(7)
-    assert ctrl.current_z_index == 7
-    assert len(received_events) == 1
-    assert received_events[-1][0] == 7
+def test_knob_end_points_and_clamp(manager):
+    d = manager.directions_deg
+    assert manager.direction_for_knob(0.0) == d[0]
+    assert manager.direction_for_knob(1.0) == d[-1]
+    assert manager.direction_for_knob(-3.0) == d[0]
+    assert manager.direction_for_knob(7.0) == d[-1]
+    # Exact upper end uses the last direction (pressure is the constant 8 there).
+    assert np.isclose(manager.get_state(0, 1.0)["surface_pressure"].mean(), 8.0)
+    assert np.isclose(manager.get_state(0, 0.0)["surface_pressure"].mean(), 0.0)
 
-    # Test rotary knob adjustment
-    ctrl.step_wind_speed(5.0)
-    assert ctrl.current_wind_speed == 35.0
-    assert len(received_events) == 2
-    assert received_events[-1][1] == 35.0
 
-    print(" -> Macropad button and rotary knob signals verified successfully.")
+def test_nearest_lines(manager):
+    # t = 0.4 and t = 0.6 between directions 2 and 3 must pick different directions' lines/k/dominant.
+    lo = manager.get_state(3, _knob_between(manager, 2, 3, 0.4))
+    hi = manager.get_state(3, _knob_between(manager, 2, 3, 0.6))
+    assert lo["lines"].shape[1] == 3
+    assert lo["k"].shape[0] == lo["lines"].shape[0] == lo["dominant"].shape[0]
+    real = ~np.isnan(lo["lines"][:, 0])
+    # Fake lines sit at the wand height, shifted along x by 0.1 * direction index.
+    assert np.allclose(lo["lines"][real, 2], manager.wand_heights[3])
+    assert np.allclose(hi["lines"][real, 0] - lo["lines"][real, 0], 0.1)
+    # k = 10 * d + (0.5..1.5): the integer tens digit identifies the direction.
+    assert int(np.nanmin(lo["k"]) // 10) == 2 and int(np.nanmin(hi["k"]) // 10) == 3
+    # dominant pattern (arange + d) % 3 starts at 2 for d=2 and at 0 for d=3.
+    assert lo["dominant"][0] == 2 and hi["dominant"][0] == 0
+    assert lo["wand_z"] == manager.wand_heights[3]
+    # Exactly on a stored direction (t = 0): that direction.
+    exact = manager.get_state(3, _knob_between(manager, 5, 6, 0.0))
+    assert int(np.nanmin(exact["k"]) // 10) == 5
+    # Wand index is clamped to the available wands.
+    assert manager.get_state(99, 0.5)["wand_index"] == 9
+    assert manager.get_state(-4, 0.5)["wand_index"] == 0
+
+
+def test_speed_along_lines_is_optional(manager, tmp_path):
+    # An older cache has no speed: the state says None rather than inventing one.
+    assert manager.get_state(3, 0.5)["speed"] is None
+    write_fake_cache(tmp_path / "s" / "f1_car_states.npz", _object_config("f1_car"), with_speed=True)
+    mgr = ObjectStateManager("f1_car", cache_dir=tmp_path / "s")
+    st = mgr.get_state(3, _knob_between(mgr, 2, 3, 0.6))  # nearest direction 3, like the lines
+    assert st["speed"].shape == st["k"].shape
+    assert np.nanmin(st["speed"]) == 300.0
+
+
+def test_filled_and_non_numeric_metrics_come_from_nearest(tmp_path):
+    cfg = {"id": "building", "cfd": {"speed_m_s": 50.0, "widgets": ["wind_load"]}}
+    write_fake_cache(tmp_path / "building_states.npz", cfg)
+    mgr = ObjectStateManager("building", cache_dir=tmp_path)
+    # Direction 3 is the filled run (filled_from = 2); direction 2 is not.
+    near_2 = mgr.get_state(0, _knob_between(mgr, 2, 3, 0.4))
+    near_3 = mgr.get_state(0, _knob_between(mgr, 2, 3, 0.6))
+    assert near_2["filled"] is False and near_2["metrics"]["filled_from"] is None
+    assert near_3["filled"] is True and near_3["metrics"]["filled_from"] == 2
+    # The wind_load list is not blended: it is the nearest direction's list, unchanged.
+    assert near_2["metrics"]["wind_load"][0]["label"] == "Breeze d2"
+    assert near_3["metrics"]["wind_load"][0]["label"] == "Breeze d3"
+    assert near_3["metrics"]["wind_load"][0]["force_n"] == 3.0
+    # Numbers in the same metrics dict are still blended (drag force is 100 + d).
+    assert np.isclose(near_3["metrics"]["drag_force_n"], 100.0 + 2 + 0.6)
+
+
+def test_worst_direction_is_computed_once_at_load(tmp_path):
+    cfg = {"id": "building", "cfd": {"speed_m_s": 50.0, "widgets": ["wind_load"]}}
+    write_fake_cache(tmp_path / "building_states.npz", cfg)  # the force in the last row is the direction index
+    mgr = ObjectStateManager("building", cache_dir=tmp_path)
+    assert mgr.worst_direction_deg == mgr.directions_deg[8]  # force 8.0 is the largest
+    for knob in (0.0, 0.3, 1.0):  # independent of where the knob is
+        assert mgr.get_state(0, knob)["worst_direction_deg"] == mgr.directions_deg[8]
+
+    fuel = {"id": "airplane", "cfd": {"speed_m_s": 102.0, "widgets": ["fuel", "speed"]}}
+    write_fake_cache(tmp_path / "airplane_states.npz", fuel)
+    assert ObjectStateManager("airplane", cache_dir=tmp_path).get_state(0, 0.5)["worst_direction_deg"] is None
+
+
+def test_worst_wind_direction_ignores_filled_directions_and_uses_the_strongest_wind_row():
+    from app.state_manager import worst_wind_direction
+
+    def m(weak, strong, filled=None):
+        return {"wind_load": [{"force_n": weak}, {"force_n": strong}], "filled_from": filled}
+
+    dirs = [0.0, 7.5, 15.0, 22.5]
+    metrics = [m(1.0, 10.0), m(9.0, 30.0), m(2.0, 20.0), m(9.0, 99.0, filled=2)]  # the 99 is a copy: not solved
+    assert worst_wind_direction(dirs, metrics) == 7.5
+    assert worst_wind_direction(dirs, [m(5.0, 5.0)] * 4) == 0.0  # ties: the lower direction
+    assert worst_wind_direction(dirs, [{"filled_from": None}] * 4) is None
+
+
+def test_lookup_under_1ms_real_size(tmp_path):
+    # ~200k surface vertices, 5 lines x 20,001 rows = ~100k points per wand, 9 directions x 2 wands.
+    cfg = _object_config("f1_car")
+    write_fake_cache(tmp_path / "f1_car_states.npz", cfg, n_wand=2, n_vertices=200_000, points_per_line=20_000)
+    mgr = ObjectStateManager("f1_car", cache_dir=tmp_path)
+    assert len(mgr.mesh_vertices) == 200_000
+    assert len(mgr.get_state(1, 0.3)["lines"]) == 5 * 20_001
+    knob = _knob_between(mgr, 2, 3)
+    mgr.get_state(1, knob)  # warm-up
+    times = []
+    for _ in range(200):
+        t0 = time.perf_counter()
+        mgr.get_state(1, knob)
+        times.append((time.perf_counter() - t0) * 1000.0)
+    median_ms = float(np.median(times))
+    print(f" -> real-size median state lookup: {median_ms:.3f} ms (target < 1.0 ms)")
+    assert median_ms < 1.0
+
+
+def test_rejects_v1_cache(tmp_path):
+    np.savez(tmp_path / "airplane_states.npz", z_steps=np.arange(10), wind_speeds=np.arange(5))
+    with pytest.raises(ValueError):
+        ObjectStateManager("airplane", cache_dir=tmp_path)
+
+
+def test_controller_signals_and_clamps():
+    ctrl = ExhibitionInputController()
+    events = []
+    views = []
+    ctrl.state_changed.connect(lambda w, k: events.append((w, k)))
+    ctrl.view_changed.connect(views.append)
+    assert (ctrl.current_wand_index, ctrl.current_knob, ctrl.current_view) == (4, 0.0, 0)
+
+    ctrl.set_wand(7)
+    assert ctrl.current_wand_index == 7 and events[-1] == (7, 0.0)
+    ctrl.set_wand(50)
+    assert ctrl.current_wand_index == 9
+    ctrl.step_wand(+1)  # already at the top: no change, no signal
+    assert ctrl.current_wand_index == 9
+    ctrl.set_wand(-5)
+    assert ctrl.current_wand_index == 0
+
+    n = len(events)
+    ctrl.step_knob(-1)  # already at 0: clamped, no signal
+    assert ctrl.current_knob == 0.0 and len(events) == n
+    ctrl.step_knob(+1)
+    assert np.isclose(ctrl.current_knob, 1 / 32) and len(events) == n + 1
+    ctrl.set_knob(5.0)
+    assert ctrl.current_knob == 1.0
+    ctrl.set_knob(-5.0)
+    assert ctrl.current_knob == 0.0
+
+    ctrl.cycle_view()
+    ctrl.cycle_view()
+    ctrl.cycle_view()
+    assert views == [1, 2, 0] and ctrl.current_view == 0
+    ctrl.set_view(2)
+    assert views[-1] == 2
+
+
+class _FakeWheel:
+    def __init__(self, dy):
+        self._dy = dy
+
+    def angleDelta(self):
+        class _P:
+            def __init__(self, y):
+                self._y = y
+
+            def y(self):
+                return self._y
+        return _P(self._dy)
+
+
+def test_keys_and_wheel():
+    ctrl = ExhibitionInputController()
+
+    def press(key):
+        return ctrl.handle_key_press(QKeyEvent(QEvent.KeyPress, key, Qt.NoModifier))
+
+    assert press(Qt.Key_1) and ctrl.current_wand_index == 0
+    assert press(Qt.Key_0) and ctrl.current_wand_index == 9
+    assert press(Qt.Key_Down) and ctrl.current_wand_index == 8
+    assert press(Qt.Key_W) and ctrl.current_wand_index == 9
+    assert press(Qt.Key_S) and ctrl.current_wand_index == 8
+    assert press(Qt.Key_Right) and np.isclose(ctrl.current_knob, 1 / 32)
+    assert press(Qt.Key_BracketLeft) and ctrl.current_knob == 0.0
+    assert not press(Qt.Key_Q)
+    assert ctrl.handle_wheel_event(_FakeWheel(120)) and ctrl.current_knob > 0.0
+    assert not ctrl.handle_wheel_event(_FakeWheel(0))
+
+
+def test_tab_cycles_view():
+    ctrl = ExhibitionInputController()
+    views = []
+    ctrl.view_changed.connect(views.append)
+    tab = QKeyEvent(QEvent.KeyPress, Qt.Key_Tab, Qt.NoModifier)
+    assert ctrl.handle_key_press(tab) is True
+    assert ctrl.current_view == 1 and views == [1]
+
+
+def test_space_toggles_detail_and_r_resets_camera():
+    ctrl = ExhibitionInputController()
+    seen, resets = [], []
+    ctrl.detail_changed.connect(seen.append)
+    ctrl.camera_reset.connect(lambda: resets.append(1))
+    assert ctrl.detailed is False  # visitors start on the simple strip
+    for key in (Qt.Key_Space, Qt.Key_Space, Qt.Key_R):
+        assert ctrl.handle_key_press(QKeyEvent(QEvent.KeyPress, key, Qt.NoModifier))
+    assert seen == [True, False] and resets == [1]
+
+
+def test_wand_lines_returns_all_heights_of_one_direction(manager):
+    lines = manager.wand_lines(0)
+    assert len(lines) == len(manager.wand_heights)
+    state = manager.get_state(3, 0.0)
+    assert state["direction_index"] == 0 and lines[3] is state["lines"]
 
 
 def test_navier_stokes_divergence():
@@ -91,7 +304,56 @@ def test_navier_stokes_divergence():
 
 
 if __name__ == "__main__":
-    test_state_manager()
-    test_input_controller()
-    test_navier_stokes_divergence()
-    print("\nALL VERIFICATION TESTS PASSED SUCCESSFULLY!")
+    raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+# ---- idle show ---------------------------------------------------------------------------------------
+def test_show_steps_have_a_caption_for_every_object():
+    from app.explainers import CAPTIONS, SHOW_STEPS, caption_for, smoothstep
+
+    for obj, texts in CAPTIONS.items():
+        assert len(texts) == len(SHOW_STEPS), obj
+        assert all(t.strip() for t in texts)
+    assert caption_for("f1_car", len(SHOW_STEPS)) == caption_for("f1_car", 0)  # wraps round
+    assert smoothstep(0.0) == 0.0 and smoothstep(1.0) == 1.0 and abs(smoothstep(0.5) - 0.5) < 1e-12
+
+
+def test_show_starts_when_idle_and_a_visitor_stops_it():
+    from app.explainers import SHOW_STEPS
+
+    ctrl = ExhibitionInputController(idle_seconds=10.0)
+    seen = []
+    ctrl.show_changed.connect(seen.append)
+
+    ctrl._last_input -= 11.0  # nobody has touched anything for 11 s
+    ctrl._tick()
+    assert ctrl.show_active and seen == [True]
+    assert ctrl.current_wand_index == SHOW_STEPS[0].wand  # the show moved the wand, and that did not stop it
+
+    ctrl.set_wand(2)  # a visitor presses button 3
+    assert not ctrl.show_active and seen == [True, False]
+    assert ctrl.current_wand_index == 2
+
+    ctrl._tick()  # touched just now: the show does not come straight back
+    assert not ctrl.show_active
+
+
+def test_show_moves_the_knob_in_a_smooth_line_and_loops():
+    from app.explainers import SHOW_STEPS
+
+    ctrl = ExhibitionInputController(idle_seconds=10.0)
+    ctrl.start_show()
+    ctrl._enter_step(2)  # knob heads from 0 to 0.5
+    ctrl._step_started -= SHOW_STEPS[2].seconds / 2.0  # halfway through the step
+    ctrl._tick()
+    assert abs(ctrl.current_knob - 0.25) < 0.02  # smoothstep(0.5) = 0.5, so halfway along the line
+    ctrl._enter_step(len(SHOW_STEPS) - 1)
+    ctrl._enter_step(ctrl.show_step + 1)
+    assert ctrl.show_step == 0  # after the last step it starts again
+
+
+def test_show_is_off_when_idle_seconds_is_zero():
+    ctrl = ExhibitionInputController(idle_seconds=0.0)
+    ctrl._last_input -= 1000.0
+    ctrl._tick()
+    assert not ctrl.show_active

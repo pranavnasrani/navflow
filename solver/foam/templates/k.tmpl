@@ -1,0 +1,48 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    object      k;
+}
+
+// Inlet k = 1.5 (0.05 V)^2: turbulence intensity 5 percent of the wind speed.
+dimensions      [0 2 -2 0 0 0 0];
+
+internalField   uniform $k_in;
+
+boundaryField
+{
+    inlet
+    {
+$inlet
+    }
+
+    outlet
+    {
+        type            inletOutlet;
+        inletValue      uniform $k_in;
+        value           uniform $k_in;
+    }
+
+    sides
+    {
+        type            zeroGradient;
+    }
+
+    top
+    {
+        type            zeroGradient;
+    }
+
+    floor
+    {
+$floor
+    }
+
+    model
+    {
+        type            kqRWallFunction;
+        value           uniform $k_in;
+    }
+}
