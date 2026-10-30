@@ -1,13 +1,14 @@
 """
 Monitor Window: native PySide6 + PyVista results window for one exhibition object.
 
-One window per object (airplane, F1 car, tower, human). All four share a single
+One window per object (airplane, F1 car, tower). All of them share a single
 ExhibitionInputController, so a button press or knob turn on the macropad updates every screen.
 
-The window is laid out like a CFD post-processor, kept uncluttered: a white graphics window (like the
-A2 poster renders) with two small colour legends, and a light report panel on the right. Space switches
-the panel between a simple and a detailed version. Smoke shows at all 10 wand heights: the selected height
-in thick lines, the other nine thin.
+The window has two parts around the graphics: a top bar with the object's name and one tab per view
+(clicking a tab, Tab on the keyboard, the macropad or the iPad all switch the same view on every screen),
+and a sidebar with the three terms of the Navier-Stokes equation and their current sizes. Nothing else:
+no captions, no explanations. Smoke shows at all 10 wand heights: the selected height in thick lines,
+the other nine thin.
 
 The picture is static between inputs: it is redrawn only when a control changes or the camera moves,
 so the GPU is idle while nobody is touching the exhibit.
@@ -38,7 +39,7 @@ import pyvista as pv
 import vtk
 from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtGui import QKeyEvent, QWheelEvent
-from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QMainWindow, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QMainWindow, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 from pyvistaqt import QtInteractor
 
 from app.hud_widgets import (
@@ -47,12 +48,9 @@ from app.hud_widgets import (
     PANEL_BG,
     RULE,
     TERM_COLORS,
-    TERM_LABELS,
     TERM_NAMES,
     TEXT,
-    MissionPanel,
     NsTermsPanel,
-    SustainabilityOverlay,
     hex_to_rgb,
     polyline_from_nan_joined,
     rainbow_cmap,
@@ -60,19 +58,10 @@ from app.hud_widgets import (
     wind_arrow_geometry,
 )
 from app.input_controller import ExhibitionInputController
-from app.explainers import HIGH_LABEL, LOW_LABEL, MISSIONS, caption_for, mission_value
 from app.state_manager import ObjectStateManager
+from app.theme import THEMES, Theme
 
-VIEW_NAMES = (
-    "View 1 of 3 · Air speed and surface pressure",
-    "View 2 of 3 · Largest Navier–Stokes term",
-    "View 3 of 3 · Turbulence energy k",
-)
-VIEW_TITLES = (
-    "Pathlines coloured by velocity magnitude  ·  Contours of pressure coefficient Cp",
-    "Pathlines coloured by the largest term of the Navier–Stokes equation",
-    "Pathlines coloured by turbulence kinetic energy k  ·  k-ω SST",
-)
+VIEW_TABS = ("Velocity & pressure", "Navier–Stokes", "Turbulence")  # one tab per view, in Tab-key order
 SPEED_TITLE = "Velocity magnitude (m/s)"
 CP_TITLE = "Pressure coefficient Cp"
 K_TITLE = "Turbulence energy k (m²/s²)"
@@ -84,8 +73,10 @@ MODEL_GREY = "#B9C0C9"
 DARK = "#2E3744"
 FONT_FILE = Path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf")  # VTK's own fonts have no Greek letters
 DISPLAY_TRIANGLES = 100_000  # enough for a monitor seen from 1-2 m; the full car mesh is 344,000
-PANEL_MIN_WIDTH, PANEL_MAX_WIDTH = 340, 520
-ORBIT_DEGREES, ORBIT_SECONDS = 22.0, 45.0  # the show swings the camera +-22 degrees, one full swing in 45 s
+PANEL_MIN_WIDTH, PANEL_MAX_WIDTH = 320, 460
+ORBIT_SECONDS = 60.0       # the camera circles the model once a minute, always
+ORBIT_TICK_MS = 33         # about 30 frames a second while it moves
+ORBIT_PAUSE_SECONDS = 8.0  # a visitor dragging or zooming holds the camera still, then it carries on
 
 
 
@@ -127,33 +118,30 @@ def _style_text(prop, size: int, color: str = TEXT, bold: bool = False) -> None:
     prop.ShadowOff()
 
 
-def panel_style(s: float) -> str:
-    """Style sheet of the report panel at scale `s` (1.0 = a 1920 x 1080 monitor)."""
+FONT_STACK = '".AppleSystemUIFont", "Helvetica Neue", Arial'
+
+
+def panel_style(s: float, theme: Theme) -> str:
+    """Style sheet of the top bar and the sidebar at scale `s` (1.0 = a 1920 x 1080 monitor)."""
     px = lambda n: max(9, int(round(n * s)))  # noqa: E731
+    tints = "\n".join(
+        f'QFrame[role="nsRow"][term="{n}"][dominant="true"] {{ background-color: {c}; }}' for n, c in theme.term_tints.items()
+    )
     return f"""
-    QWidget#panel {{ background-color: {PANEL_BG}; border-left: 1px solid {RULE}; }}
-    QLabel {{ color: {TEXT}; background: transparent; border: none; font-family: Arial; }}
-    QLabel[role="title"] {{ font-size: {px(30)}px; font-weight: 700; }}
-    QLabel[role="sub"] {{ font-size: {px(17)}px; color: {MUTED}; }}
-    QLabel[role="section"] {{ font-size: {px(17)}px; font-weight: 700; padding-top: {px(14)}px; }}
-    QFrame[role="rule"] {{ background-color: {RULE}; border: none; }}
-    QLabel[role="key"] {{ font-size: {px(16)}px; color: {MUTED}; }}
-    QLabel[role="value"] {{ font-size: {px(16)}px; font-weight: 700; }}
-    QLabel[role="big"] {{ font-size: {px(21)}px; font-weight: 700; }}
-    QLabel[role="small"] {{ font-size: {px(13)}px; color: {MUTED}; }}
-    QLabel[role="mission"] {{ font-size: {px(22)}px; font-weight: 700; color: {TEXT}; }}
-    QLabel[role="hero"] {{ font-size: {px(46)}px; font-weight: 700; color: #EA580C; }}
-    QLabel[role="hint"] {{ font-size: {px(15)}px; color: #1E3A8A; background-color: #DBEAFE; padding: {px(8)}px {px(10)}px; }}
-    QLabel[role="hint"][found="true"] {{ color: #14532D; background-color: #DCFCE7; font-weight: 700; }}
-    QLabel[role="equation"] {{ font-size: {px(22)}px; font-family: "STIX Two Text", "Times New Roman"; }}
-    QLabel[role="term"] {{ font-size: {px(14)}px; font-weight: 700; }}
-    QLabel[role="termValue"] {{ font-size: {px(15)}px; }}
-    QLabel[role="termValue"][dominant="true"] {{ font-weight: 700; }}
-    QLabel[role="warn"] {{ font-size: {px(14)}px; font-weight: 700; color: #7A4B00; background-color: #FFF1CC;
-                          padding: {px(6)}px {px(10)}px; }}
-    QLabel[role="note"] {{ font-size: {px(13)}px; color: {TEXT}; background-color: #DDE2E8; padding: {px(8)}px; }}
-    QLabel[role="console"] {{ font-family: Menlo; font-size: {px(13)}px; color: #D5DBE3; background-color: #1E232A;
-                             padding: {px(10)}px {px(14)}px; }}
+    QWidget {{ font-family: {FONT_STACK}; }}
+    QWidget#topbar {{ background-color: {theme.topbar}; border-bottom: 1px solid {theme.rule}; }}
+    QLabel[role="name"] {{ color: {theme.text}; background: transparent; font-size: {px(23)}px; font-weight: 700; }}
+    QPushButton[role="tab"] {{ color: {theme.muted}; background-color: transparent; border: none; border-radius: {px(9)}px;
+                              font-size: {px(18)}px; font-weight: 600; padding: {px(9)}px {px(20)}px; }}
+    QPushButton[role="tab"]:hover {{ background-color: {theme.tab_hover}; color: {theme.text}; }}
+    QPushButton[role="tab"][active="true"] {{ background-color: {theme.tab_on_bg}; color: {theme.tab_on_fg}; }}
+    QWidget#panel {{ background-color: {theme.panel}; border-left: 1px solid {theme.rule}; }}
+    QFrame[role="nsRow"] {{ background-color: transparent; border-radius: {px(14)}px; }}
+    {tints}
+    QLabel[role="math"] {{ background: transparent; }}
+    QLabel[role="nsValue"] {{ color: {theme.text}; background: transparent; font-size: {px(36)}px; font-weight: 600; }}
+    QLabel[role="nsValue"][dominant="true"] {{ font-weight: 800; }}
+    QLabel[role="nsUnit"] {{ color: {theme.muted}; background: transparent; font-size: {px(16)}px; padding: 0 0 0 {px(4)}px; }}
     """
 
 
@@ -164,6 +152,7 @@ class MonitorWindow(QMainWindow):
         input_controller: ExhibitionInputController,
         cache_dir: str = "assets/cache",
         remote_url: str | None = None,
+        orbit_seconds: float = ORBIT_SECONDS,
         parent=None,
     ):
         super().__init__(parent)
@@ -177,14 +166,12 @@ class MonitorWindow(QMainWindow):
         self.rho = float(self.cfd_cfg.get("density_kg_m3", 1.225))
         self.view = 0
 
-        self.setWindowTitle(
-            f"Monitor {self.obj_cfg.get('monitor_index', 0) + 1}: {self.obj_cfg['display_name']} — Navier-Stokes CFD"
-        )
+        self.setWindowTitle(f"NavFlow: {self.obj_cfg['display_name']}")
+        self.theme: Theme = THEMES.get(getattr(input_controller, "theme", "light"), THEMES["light"])
         self.resize(1280, 800)
         self.setFocusPolicy(Qt.StrongFocus)
 
-        self.detailed = False
-        self._show, self._show_step = False, 0  # the idle show (see app/explainers.py)
+        self.orbit_seconds = float(orbit_seconds)  # 0 holds the camera still
 
         self._build_ui()
         self._setup_3d_scene()
@@ -194,27 +181,23 @@ class MonitorWindow(QMainWindow):
 
         self.controller.state_changed.connect(self.on_state_changed)
         self.controller.view_changed.connect(self.on_view_changed)
-        self.controller.detail_changed.connect(self.on_detail_changed)
         self.controller.camera_reset.connect(self.reset_camera)
-        self.controller.show_changed.connect(self.on_show_changed)
-        self.controller.show_step_changed.connect(self.on_show_step)
+        self.controller.theme_changed.connect(self.apply_theme)
 
-        self._orbit_angle, self._orbit_t0 = 0.0, 0.0
-        self.orbit_timer = QTimer(self)  # runs only while the idle show runs
-        self.orbit_timer.setInterval(50)
+        # The camera circles the model all the time (the one thing that moves while nobody is touching the exhibit).
+        self._orbit_t = time.monotonic()
+        self._orbit_pause_until = 0.0
+        self.orbit_timer = QTimer(self)
+        self.orbit_timer.setInterval(ORBIT_TICK_MS)
         self.orbit_timer.timeout.connect(self._orbit_tick)
-        self.celebrate_timer = QTimer(self)  # how long "You found it!" stays on the 3D view
-        self.celebrate_timer.setSingleShot(True)
-        self.celebrate_timer.setInterval(6000)
-        self.celebrate_timer.timeout.connect(self._end_celebration)
+        if self.orbit_seconds > 0:
+            self.orbit_timer.start()
 
-        # No animation loop: the scene is drawn when something changes, so an idle exhibit costs no GPU.
-        # (The timer is kept, stopped, for tools that expect it.)
-        self.anim_timer = QTimer(self)
+        self.anim_timer = QTimer(self)  # kept, stopped, for tools that expect it
 
+        self.apply_theme(self.theme.name)
         self.update_view(self.controller.current_wand_index, self.controller.current_knob)
         self.on_view_changed(self.controller.current_view)
-        self.on_detail_changed(self.controller.detailed)
 
     # ------------------------------------------------------------------------------------------
     # Report panel
@@ -222,121 +205,59 @@ class MonitorWindow(QMainWindow):
     def _build_ui(self) -> None:
         central = QWidget(self)
         self.setCentralWidget(central)
-        central.setStyleSheet(f"background-color: {PANEL_BG};")
-        main_layout = QHBoxLayout(central)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(0)
+        central.setStyleSheet(f"background-color: {self.theme.panel};")
+        outer = QVBoxLayout(central)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # Top bar: the object's name, then one tab per view
+        bar = QWidget()
+        bar.setObjectName("topbar")
+        bar.setAttribute(Qt.WA_StyledBackground, True)
+        self.topbar = bar
+        bar_lay = QHBoxLayout(bar)
+        bar_lay.setContentsMargins(28, 0, 28, 0)
+        bar_lay.setSpacing(6)
+        self.top_layout = bar_lay
+        name = QLabel(self.obj_cfg.get("display_name", "Object"))
+        name.setProperty("role", "name")
+        bar_lay.addWidget(name)
+        bar_lay.addSpacing(28)
+        self.tabs: list[QPushButton] = []
+        for i, title in enumerate(VIEW_TABS):
+            tab = QPushButton(title.replace("&", "&&"))  # a single & would mark a keyboard shortcut
+            tab.setProperty("role", "tab")
+            tab.setProperty("active", i == 0)
+            tab.setFocusPolicy(Qt.NoFocus)  # keys keep going to the controller, never to a button
+            tab.setCursor(Qt.PointingHandCursor)
+            tab.clicked.connect(lambda _=False, v=i: self.controller.set_view(v))
+            bar_lay.addWidget(tab)
+            self.tabs.append(tab)
+        bar_lay.addStretch(1)
+        outer.addWidget(bar)
+
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(0)
+        outer.addLayout(body, stretch=1)
 
         self.plotter = QtInteractor(self)
         self.plotter.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.plotter.setFocusPolicy(Qt.StrongFocus)
-        main_layout.addWidget(self.plotter, stretch=1)
+        body.addWidget(self.plotter, stretch=1)
 
+        # Sidebar: the equation and the current size of each of its three terms
         panel = QWidget()
         panel.setObjectName("panel")
         panel.setAttribute(Qt.WA_StyledBackground, True)
         self.panel = panel
         lay = QVBoxLayout(panel)
         self.panel_layout = lay
-        lay.setContentsMargins(28, 26, 28, 0)
-        lay.setSpacing(4)
-
-        def label(text: str, role: str, wrap: bool = False) -> QLabel:
-            lb = QLabel(text)
-            lb.setProperty("role", role)
-            lb.setWordWrap(wrap)
-            return lb
-
-        self._detail_only: list[QWidget] = []  # hidden in the simple panel (Space)
-
-        def section(title: str) -> list[QWidget]:
-            head = label(title, "section")
-            lay.addWidget(head)
-            rule = QFrame()
-            rule.setProperty("role", "rule")
-            rule.setFixedHeight(1)
-            lay.addWidget(rule)
-            lay.addSpacing(4)
-            return [head, rule]
-
-        lay.addWidget(label(self.obj_cfg.get("display_name", "Object"), "title", wrap=True))
-        self.lbl_direction = label("", "sub")
-        self.lbl_wand = label("", "sub")
-        lay.addWidget(self.lbl_direction)
-        lay.addWidget(self.lbl_wand)
-
-        # The visitor's challenge (app/explainers.py MISSIONS): the first thing in the panel
-        self.mission = MISSIONS.get(self.obj_id)
-        self.mission_panel = None
-        self._mission_found = False
-        if self.mission is not None:
-            section("Your challenge")
-            self.mission_panel = MissionPanel(self.mission)
-            dirs = self.state_mgr.directions_deg
-            self.mission_panel.set_curve(dirs, [mission_value(self.mission.kind, m) for m in self.state_mgr.solved_metrics()])
-            lay.addWidget(self.mission_panel)
-
-        self._detail_only += section("Forces")
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(16)
-        grid.setVerticalSpacing(5)
-        self.force_values: dict[str, QLabel] = {}
-        for i, (key, name) in enumerate((
-            ("drag", "Drag"), ("lift", "Lift"), ("cd", "Cd"), ("cl", "Cl"),
-            ("area", "Frontal area"), ("re", "Reynolds no. VD/ν"),
-        )):
-            r, c = divmod(i, 2)
-            key_lb = label(name, "key")
-            grid.addWidget(key_lb, r, 2 * c)
-            val = label("", "value")
-            val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            grid.addWidget(val, r, 2 * c + 1)
-            self.force_values[key] = val
-            self._detail_only += [key_lb, val]  # the challenge's number stands in for these in the simple panel
-        grid.setColumnStretch(1, 1)
-        grid.setColumnStretch(3, 1)
-        lay.addLayout(grid)
-        power_row = QHBoxLayout()
-        power_key = label("Drag power  P = ½ρCdAV³", "key")
-        power_row.addWidget(power_key)
-        power_row.addStretch()
-        self.lbl_power = label("", "big")
-        power_row.addWidget(self.lbl_power)
-        lay.addLayout(power_row)
-        self._detail_only += [power_key, self.lbl_power]
-
-        # The Navier–Stokes bars are the point of the exhibit, so they stay in the simple panel too
-        section("Navier–Stokes terms")
+        lay.setContentsMargins(24, 28, 24, 24)
+        lay.setSpacing(0)
         self.ns_panel = NsTermsPanel()
         lay.addWidget(self.ns_panel)
-
-        widgets = tuple(self.cfd_cfg.get("widgets", ()))
-        self.overlay = SustainabilityOverlay(widgets)
-        if widgets:
-            self._detail_only += section("Wind load on the tower" if "wind_load" in widgets else "Sustainability")
-            lay.addWidget(self.overlay)
-            self._detail_only.append(self.overlay)
-        self.lbl_sdg = label(self.overlay._sdg_text(), "small")  # the SDG tag stays in the simple panel
-        lay.addWidget(self.lbl_sdg)
-
-        # Honest note when this direction was copied from the nearest simulated one
-        self.lbl_filled = label("", "warn", wrap=True)
-        self.lbl_filled.hide()
-        lay.addSpacing(8)
-        lay.addWidget(self.lbl_filled)
-
-        # Building info card (earthquake / tsunami scope note)
-        self.lbl_info = label(self.obj_cfg.get("info_card", ""), "note", wrap=True)
-        self.lbl_info.setVisible(bool(self.obj_cfg.get("info_card")))
-        lay.addWidget(self.lbl_info)
-
-        self._detail_only.append(self.lbl_info)
-        lay.addStretch()
-        self.lbl_run = label("", "console", wrap=True)
-        lay.addWidget(self.lbl_run)
-        self._detail_only.append(self.lbl_run)
-
-        main_layout.addWidget(panel)
+        body.addWidget(panel)
         self._apply_responsive_layout()
 
     # ------------------------------------------------------------------------------------------
@@ -344,7 +265,7 @@ class MonitorWindow(QMainWindow):
     # ------------------------------------------------------------------------------------------
     def _setup_3d_scene(self) -> None:
         pl = self.plotter
-        pl.set_background(BACKGROUND)
+        pl.set_background(self.theme.bg3d)
         pl.enable_anti_aliasing("msaa", multi_samples=4)
 
         b = self.view_bounds
@@ -405,7 +326,7 @@ class MonitorWindow(QMainWindow):
         self._last_lines = None
         self.arrow_poly = self._wind_arrow(np.array([1.0, 0.0, 0.0]))
         self.rod_poly = self._wand_rod(np.empty((0, 3)), float(self.state_mgr.wand_heights[0]))
-        pl.add_mesh(self.arrow_poly, color=MUTED, smooth_shading=True, name="wind_arrow", render=False)
+        pl.add_mesh(self.arrow_poly, color=self.theme.arrow, smooth_shading=True, name="wind_arrow", render=False)
         pl.add_mesh(self.rod_poly, color="#A9B1BB", smooth_shading=True, name="wand_rod", render=False)
 
 
@@ -423,7 +344,15 @@ class MonitorWindow(QMainWindow):
             bar.SetDrawFrame(False)
             bar.SetTextPositionToPrecedeScalarBar()
             bar.SetTextPad(8)
+            bar.SetTitle("")  # the title is drawn by our own text actor above the bar (see _layout_overlays)
             self.bars[title] = bar
+        self.bar_titles = {}
+        for title in self.bars:
+            actor = vtk.vtkTextActor()
+            actor.SetInput(title)
+            actor.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
+            pl.renderer.AddViewProp(actor)
+            self.bar_titles[title] = actor
         # Cp ticks at the exact ends of the fixed scale
         ticks = vtk.vtkDoubleArray()
         for t in CP_RANGE:
@@ -431,38 +360,7 @@ class MonitorWindow(QMainWindow):
         self.bars[CP_TITLE].SetUseCustomLabels(True)
         self.bars[CP_TITLE].SetCustomLabels(ticks)
 
-        # Titles in the graphics window, Fluent style: what is shown, then the controls
-        self.txt_title = vtk.vtkTextActor()
-        self.txt_view = vtk.vtkTextActor()
-        self.txt_hint = vtk.vtkTextActor()
-        self.txt_terms = {n: vtk.vtkTextActor() for n in TERM_NAMES}
-        for name, actor in self.txt_terms.items():
-            actor.SetInput("■  " + TERM_LABELS[name])
-        self.txt_hint.SetInput(self._hint_text(False))
-
-        # Explainer text: a caption for the idle show, and two labels pinned to points on the model
-        self.txt_caption = vtk.vtkTextActor()
-        self.txt_caption.VisibilityOff()
-        self.callouts = [self._make_callout(HIGH_LABEL, "#C2410C", above=True),
-                         self._make_callout(LOW_LABEL, "#1D4ED8", above=False)]
-        pl.renderer.AddObserver("StartEvent", lambda *_: self._reproject_callouts())  # keeps them on their points
-        for actor in (self.txt_title, self.txt_view, self.txt_hint, self.txt_caption, *self.txt_terms.values()):
-            actor.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
-            pl.renderer.AddViewProp(actor)
-
         self._fit_camera()
-
-    def _hint_text(self, detailed: bool) -> str:
-        """One short line for visitors; the camera keys and the remote address only in the detailed view."""
-        if self._show:
-            return "Show mode    ·    turn the knob or press any button to take over"
-        if not detailed:
-            return "1–0  smoke height    ·    Knob  wind direction    ·    Tab  view    ·    Space  more detail"
-        text = ("Buttons 1–0: smoke wand  ·  Knob: wind direction  ·  Tab: change view  ·  Space: less detail\n"
-                "Drag: turn  ·  Pinch or ⌘ + scroll: zoom  ·  R: reset view")
-        if self.remote_url:
-            text += f"\nRemote control: {self.remote_url}"
-        return text
 
     def _focus_bounds(self) -> np.ndarray:
         """The model's box plus room for the wake behind it, kept inside the display box."""
@@ -474,18 +372,40 @@ class MonitorWindow(QMainWindow):
         f[1::2] = np.minimum(f[1::2], b[1::2])
         return f
 
+    def _fit_distance(self, d: np.ndarray) -> float:
+        """How far the camera must be, looking along `d` (from the focus to the camera), for the model-and-wake
+        box to fill the window without leaving it.
+
+        Seen from direction d, the box's half-width on screen is hw = ex |r_x| + ey |r_y| where r is the screen's
+        horizontal axis and (ex, ey) the box's half sizes: a long box seen side-on is wide, end-on it is narrow.
+        With half field-of-view angles a_v (up-down) and a_h = atan(tan(a_v) x aspect) (left-right), a sphere of
+        radius r just fits at distance r / sin(a), so the distance is the larger of hw / sin(a_h) and
+        (half height + the pitch's share of the footprint) / sin(a_v)."""
+        f = self._focus_bounds()
+        centre = (f[0::2] + f[1::2]) / 2.0
+        lb = self._line_bounds  # the drawn streamlines can reach further than the focus box along the wind
+        lo, hi = np.minimum(f[0::2], lb[0::2]), np.maximum(f[1::2], lb[1::2])
+        half = np.maximum(hi - centre, centre - lo)
+        half[1:] = 0.5 * (f[3::2] - f[2::2])  # across the wind and up, the focus box is what is drawn
+        a_v = math.radians(self.plotter.camera.GetViewAngle()) / 2.0
+        aspect = max(self.plotter.width(), 1) / max(self.plotter.height(), 1)
+        a_h = math.atan(math.tan(a_v) * aspect)
+        flat = math.hypot(d[0], d[1])
+        r = np.array([-d[1], d[0]]) / max(flat, 1e-9)  # the screen's horizontal axis, in the ground plane
+        half_w = half[0] * abs(r[0]) + half[1] * abs(r[1])
+        depth = half[0] * abs(d[0]) + half[1] * abs(d[1])  # how far the footprint reaches along the view
+        need_v = half[2] + depth * d[2]
+        return 1.08 * max(half_w / math.sin(a_h), need_v / math.sin(a_v))
+
     def _fit_camera(self) -> None:
-        """Aim at the midpoint of the model-and-wake box from upstream, to the side and above."""
+        """Aim at the midpoint of the model-and-wake box at a fixed, shallow angle (about 10 degrees above
+        level, never changing) and back off just far enough to fill the window."""
         f = self._focus_bounds()
         centre = (f[0::2] + f[1::2]) / 2.0  # midpoint on each axis
-        diag = float(np.linalg.norm(f[1::2] - f[0::2]))
-        eye = centre + diag * np.array([-0.62, -0.95, 0.42])
+        direction = _unit(np.array([-0.62, -0.95, 0.20]))
+        eye = centre + self._fit_distance(direction) * direction
         self.plotter.camera_position = [tuple(eye), tuple(centre), (0.0, 0.0, 1.0)]
-        self.plotter.reset_camera(bounds=tuple(f))
-        # a tall, narrow view (aspect < 1.3) is limited by its width, so zoom in less
-        aspect = self.plotter.width() / max(self.plotter.height(), 1)
-        # the idle show draws a caption bar along the bottom, so the picture is a little smaller then
-        self.plotter.camera.zoom(1.2 * min(1.0, aspect / 1.3) * (0.86 if self._show else 1.0))
+        self.plotter.renderer.ResetCameraClippingRange()
 
     @staticmethod
     def _tubes(lines: pv.PolyData, radius: float) -> pv.PolyData:
@@ -530,7 +450,7 @@ class MonitorWindow(QMainWindow):
         if state["lines"] is not self._last_lines:
             self._last_lines = state["lines"]
             dom = np.asarray(state["dominant"])
-            palette = np.array([hex_to_rgb(TERM_COLORS[n]) for n in TERM_NAMES] + [(255, 255, 255)], dtype=np.uint8)
+            palette = np.array([hex_to_rgb(self.theme.term_colors[n]) for n in TERM_NAMES] + [(255, 255, 255)], dtype=np.uint8)
             rgb = palette[np.where(dom >= 0, dom, 3)] if len(dom) else np.zeros((0, 3), dtype=np.uint8)
             speed = state.get("speed")
             self._has_speed = speed is not None
@@ -557,186 +477,52 @@ class MonitorWindow(QMainWindow):
             self._ghost_key = key
             self._update_ghosts(*key)
 
-        # 2c. Explainer labels pinned to the highest and lowest surface pressure of this state
-        self._place_callouts()
-
         # 3. Wind arrow: same shape every time, so its points are updated in place (no new actor, no render).
         self.arrow_poly.copy_from(self._wind_arrow(state["wind_vector"]))
 
-        # 4. Report panel
-        n_wand = len(self.state_mgr.wand_heights)
-        label = self.cfd_cfg.get("direction_label", "Wind direction")
-        self.lbl_direction.setText(f"{state['wind_speed']:.0f} m/s (fixed)  ·  {label} {state['direction_deg']:.1f}°")
-        self.lbl_wand.setText(f"Smoke wand {state['wand_index'] + 1} of {n_wand}  ·  z = {state['wand_z']:.2f} m")
-
-        def m(key: str) -> float:
-            v = metrics.get(key, 0.0)
-            return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else 0.0
-
-        fv = self.force_values
-        fv["drag"].setText(f"{m('drag_force_n'):,.0f} N")
-        fv["lift"].setText(f"{m('lift_force_n'):+,.0f} N")
-        fv["cd"].setText(f"{m('drag_coefficient_cd'):.3f}")
-        fv["cl"].setText(f"{m('lift_coefficient_cl'):+.3f}")
-        fv["area"].setText(f"{m('frontal_area_m2'):.2f} m²")
-        fv["re"].setText(f"{m('reynolds_number'):.2e}")
-        power = m("drag_power_kw")
-        self.lbl_power.setText(f"{power / 1000:,.2f} MW" if power >= 1000 else f"{power:,.1f} kW")
-
+        # 4. Sidebar: the three Navier-Stokes terms of this state
         self.ns_panel.set_terms(state["ns_terms"])
-
-        converged = metrics.get("converged")
-        self.lbl_run.setText(
-            f"> simpleFoam  k-ω SST\n  {int(m('iterations'))} iterations, "
-            + ("converged" if converged else "not fully converged: time-averaged fields")
-        )
-
-        if state["filled"]:
-            src = metrics.get("filled_from")
-            where = ""
-            if isinstance(src, (int, float)) and 0 <= int(src) < len(self.state_mgr.directions_deg):
-                where = f" ({self.state_mgr.directions_deg[int(src)]:g}°)"
-            self.lbl_filled.setText(f"Nearest simulated direction shown{where}: this angle is not solved yet.")
-            self.lbl_filled.show()
-        else:
-            self.lbl_filled.hide()
-
-        self.overlay.set_metrics(metrics, state.get("worst_direction_deg"))
-        self._direction = float(state["direction_deg"])
-        self._update_mission()
-        self.plotter.render()
-
-    def _update_mission(self) -> None:
-        """Move the challenge's dot; the moment a visitor reaches the answer, say so on the 3D view too."""
-        if self.mission_panel is None:
-            return
-        found = self.mission_panel.update_direction(getattr(self, "_direction", 0.0), show_mode=self._show)
-        if found and not self._mission_found:
-            self.txt_caption.SetInput(self._two_lines(self.mission.found))
-            self.txt_caption.SetVisibility(True)
-            self.celebrate_timer.start()
-        self._mission_found = found
-
-    def _end_celebration(self) -> None:
-        if not self._show:
-            self.txt_caption.SetVisibility(False)
-            self.plotter.render()
-
-    @staticmethod
-    def _two_lines(text: str) -> str:
-        """Two balanced lines at most: break at the space nearest the middle."""
-        if len(text) <= 56:
-            return text
-        mid = len(text) // 2
-        cut = min((i for i, ch in enumerate(text) if ch == " "), key=lambda i: abs(i - mid))
-        return text[:cut] + "\n" + text[cut + 1:]
-
-    def _make_callout(self, text: str, color: str, above: bool) -> dict:
-        """A label with a dot and a leader line, all 2D actors; _reproject_callouts keeps them on a 3D point."""
-        rgb = tuple(v / 255.0 for v in hex_to_rgb(color))
-        label = vtk.vtkTextActor()
-        label.SetInput(text)
-        dot = vtk.vtkTextActor()
-        dot.SetInput("●")
-        line = vtk.vtkPolyData()
-        line.SetPoints(vtk.vtkPoints())
-        line.GetPoints().SetNumberOfPoints(2)
-        cells = vtk.vtkCellArray()
-        cells.InsertNextCell(2)
-        cells.InsertCellPoint(0)
-        cells.InsertCellPoint(1)
-        line.SetLines(cells)
-        mapper = vtk.vtkPolyDataMapper2D()
-        mapper.SetInputData(line)
-        leader = vtk.vtkActor2D()
-        leader.SetMapper(mapper)
-        leader.GetProperty().SetColor(*rgb)
-        leader.GetProperty().SetLineWidth(2.0)
-        for actor in (label, dot, leader):
-            actor.VisibilityOff()
-            self.plotter.renderer.AddViewProp(actor)
-        return {"label": label, "dot": dot, "line": line, "leader": leader, "color": color, "above": above,
-                "point": None, "wanted": False}
-
-    def _place_callouts(self) -> None:
-        """Aim the two labels at the highest-pressure and the lowest-pressure vertex of the model."""
-        cp = np.asarray(self.mesh_poly.point_data[CP_TITLE], dtype=float)
-        if not np.isfinite(cp).any():
-            return
-        pts = np.asarray(self.mesh_poly.points)
-        for c, i in zip(self.callouts, (int(np.nanargmax(cp)), int(np.nanargmin(cp)))):
-            c["point"] = pts[i].copy()
-
-    def _set_callouts_visible(self, on: bool) -> None:
-        for c in self.callouts:
-            c["wanted"] = bool(on)
-            for k in ("label", "dot", "leader"):
-                c[k].SetVisibility(bool(on) and c["point"] is not None)
-
-    def _reproject_callouts(self) -> None:
-        """Before every draw: project each 3D point to the screen, put its dot there and its label an offset away."""
-        r = self.plotter.renderer
-        w, h = r.GetSize()
-        for c in self.callouts:
-            if not c["wanted"] or c["point"] is None:
-                continue
-            r.SetWorldPoint(*c["point"], 1.0)
-            r.WorldToDisplay()
-            x, y, _ = r.GetDisplayPoint()
-            if c["above"]:  # label up and to the left of its point, right-aligned
-                lx, ly = min(max(x - 40, 330), w - 20), min(max(y + 100, 60), h - 120)
-                just = "right"
-            else:  # label down and to the right, left-aligned
-                lx, ly = min(max(x + 40, 20), w - 330), min(max(y - 100, 120), h - 60)
-                just = "left"
-            tp = c["label"].GetTextProperty()
-            tp.SetJustificationToRight() if just == "right" else tp.SetJustificationToLeft()
-            tp.SetVerticalJustificationToBottom() if c["above"] else tp.SetVerticalJustificationToTop()
-            c["label"].SetPosition(lx, ly)
-            dtp = c["dot"].GetTextProperty()
-            dtp.SetJustificationToCentered()
-            dtp.SetVerticalJustificationToCentered()
-            c["dot"].SetPosition(x, y)
-            pts = c["line"].GetPoints()
-            pts.SetPoint(0, x, y, 0.0)
-            pts.SetPoint(1, lx, ly + (-4 if c["above"] else 4), 0.0)
-            pts.Modified()
-            c["line"].Modified()
-
-    def on_show_changed(self, active: bool) -> None:
-        """The idle show started or stopped. It swings the camera slowly; a visitor takes over from a clean view."""
-        self._show = bool(active)
-        self.txt_hint.SetInput(self._hint_text(self.detailed))
-        self.txt_caption.SetVisibility(self._show)
-        self._mission_found = False
-        self._update_mission()
-        if self._show:
-            self._fit_camera()
-            self._orbit_angle, self._orbit_t0 = 0.0, time.monotonic()
-            self.on_show_step(self.controller.show_step)
-            self.orbit_timer.start()
-        else:
-            self.orbit_timer.stop()
-            self._fit_camera()
-        self.plotter.render()
-
-    def on_show_step(self, step: int) -> None:
-        self._show_step = int(step)
-        self.txt_caption.SetInput(self._two_lines(caption_for(self.obj_id, step)))
         self.plotter.render()
 
     def _orbit_tick(self) -> None:
-        """Swing the camera about the point it looks at: angle = A sin(2 pi t / T)."""
-        t = time.monotonic() - self._orbit_t0
-        angle = ORBIT_DEGREES * math.sin(2.0 * math.pi * t / ORBIT_SECONDS)
-        self.plotter.camera.Azimuth(angle - self._orbit_angle)
-        self._orbit_angle = angle
+        """Turn the model like a turntable: the camera circles the upright axis through the point it looks at,
+        azimuth growing by 360 degrees every `orbit_seconds`. The height and the pitch never change."""
+        now = time.monotonic()
+        dt = min(now - self._orbit_t, 0.25)  # a stalled frame must not make the camera jump
+        self._orbit_t = now
+        if now < self._orbit_pause_until or not self.isVisible():
+            return
+        cam = self.plotter.camera
+        cam.Azimuth(360.0 * dt / self.orbit_seconds)
+        # the box is long: end-on it is narrow, side-on wide, so the camera glides in and out to keep it filling the window
+        focus = np.array(cam.GetFocalPoint())
+        d = np.array(cam.GetPosition()) - focus
+        d /= np.linalg.norm(d)
+        cam.SetPosition(*(focus + self._fit_distance(d) * d))
         self.plotter.renderer.ResetCameraClippingRange()
         self.plotter.render()
 
+    def apply_theme(self, name: str) -> None:
+        """Switch every colour to the light or dark theme: graphics background, bars, text, model and lines."""
+        self.theme = THEMES.get(name, THEMES["light"])
+        t = self.theme
+        self.centralWidget().setStyleSheet(f"background-color: {t.panel};")
+        pl = self.plotter
+        pl.set_background(t.bg3d)
+        for actor_name, colour in (("wind_arrow", t.arrow), ("wand_rod", t.rod)):
+            actor = pl.actors.get(actor_name)
+            if actor is not None:
+                actor.prop.color = colour
+        self.ns_panel.set_theme(t)
+        self._apply_responsive_layout()
+        self._last_lines, self._ghost_key = None, None  # the streamline colours come from the theme: rebuild them
+        self._apply_view_visibility()
+        self._layout_overlays()
+        self.update_view(self.controller.current_wand_index, self.controller.current_knob)
+
     def _update_ghosts(self, direction_index: int, selected: int) -> None:
         """Join the lines of every other wand height (counting from the selected one) into the thin tubes."""
-        palette = np.array([hex_to_rgb(TERM_COLORS[n]) for n in TERM_NAMES] + [(160, 160, 160)], dtype=np.uint8)
+        palette = np.array([hex_to_rgb(self.theme.term_colors[n]) for n in TERM_NAMES] + [(160, 160, 160)], dtype=np.uint8)
         sep_pt, pts, speed, k, rgb = np.full((1, 3), np.nan), [], [], [], []
         for j, (lines, kk, dom, sp) in enumerate(self.state_mgr.wand_sets(direction_index)):
             if j == selected or (j - selected) % 2 or len(lines) == 0:
@@ -764,19 +550,6 @@ class MonitorWindow(QMainWindow):
             self._ghost_ok = False
         self._apply_view_visibility()
 
-    def on_detail_changed(self, detailed: bool) -> None:
-        """Simple panel: name, state, drag, lift, power and the sustainability story. Detailed: everything."""
-        self.detailed = bool(detailed)
-        for w in self._detail_only:
-            w.setVisible(self.detailed)
-        if not self.obj_cfg.get("info_card"):
-            self.lbl_info.setVisible(False)
-        self.overlay.set_detailed(self.detailed)
-        self.lbl_sdg.setVisible(not self.detailed and bool(self.lbl_sdg.text()))
-        self.ns_panel.caption.setVisible(self.detailed and self.height() >= 820)
-        self.txt_hint.SetInput(self._hint_text(self.detailed))
-        self.plotter.render()
-
     def reset_camera(self) -> None:
         self._fit_camera()
         self.plotter.render()
@@ -788,9 +561,11 @@ class MonitorWindow(QMainWindow):
 
     def on_view_changed(self, view: int) -> None:
         """Switch all actors and legends to `view` (0 speed + Cp, 1 dominant term, 2 turbulence k)."""
-        self.view = view % len(VIEW_NAMES)
-        self.txt_title.SetInput(VIEW_TITLES[self.view])
-        self.txt_view.SetInput(VIEW_NAMES[self.view])
+        self.view = view % len(VIEW_TABS)
+        for i, tab in enumerate(self.tabs):
+            tab.setProperty("active", i == self.view)
+            tab.style().unpolish(tab)
+            tab.style().polish(tab)
         self._apply_view_visibility()
         self._layout_overlays()
         self.plotter.render()
@@ -806,81 +581,62 @@ class MonitorWindow(QMainWindow):
             actor.SetVisibility(ghost_ok and view == i)
         if getattr(self, "ghost_actors", None) and view == 0 and not self._has_speed:
             self.ghost_actors[0].mapper.scalar_visibility = False
-            self.ghost_actors[0].prop.color = DARK
+            self.ghost_actors[0].prop.color = self.theme.lines_plain
         if view == 0 and not self._has_speed:  # no speed stored: plain dark pathlines, no speed legend
             speed.mapper.scalar_visibility = False
-            speed.prop.color = DARK
+            speed.prop.color = self.theme.lines_plain
         else:
             speed.mapper.scalar_visibility = True
         # The model carries Cp colours only in view 0; elsewhere it is grey so the single colour scale
         # on screen belongs to the pathlines.
         self.mesh_actor.mapper.scalar_visibility = view == 0
-        self.mesh_actor.prop.color = MODEL_GREY
+        self.mesh_actor.prop.color = self.theme.model_grey
         self.bars[SPEED_TITLE].SetVisibility(view == 0 and self._has_speed)
         self.bars[CP_TITLE].SetVisibility(view == 0)
         self.bars[K_TITLE].SetVisibility(view == 2)
-        for actor in self.txt_terms.values():
-            actor.SetVisibility(view == 1)
-        self._set_callouts_visible(view == 0)
+        for title, actor in self.bar_titles.items():
+            actor.SetVisibility(bool(self.bars[title].GetVisibility()))
 
     def _layout_overlays(self) -> None:
-        """Place legends and titles in the graphics window; text sizes follow the window height."""
+        """Place the colour legends in the graphics window; their text size follows the window height."""
         h = max(self.plotter.height(), 1)
         w = max(self.plotter.width(), 1)
         title_px, label_px = max(10, int(0.019 * h)), max(9, int(0.0155 * h))
-        self.txt_title.SetVisibility(False)  # one short line is enough: the view name
-        _style_text(self.txt_view.GetTextProperty(), max(11, int(0.021 * h)), TEXT, bold=True)
-        self.txt_view.SetPosition(0.018, 0.945)
-        cap = self.txt_caption.GetTextProperty()
-        _style_text(cap, max(14, int(0.03 * h)), TEXT, bold=True)
-        cap.SetJustificationToCentered()
-        cap.SetVerticalJustificationToBottom()
-        cap.SetBackgroundColor(1.0, 1.0, 1.0)
-        cap.SetBackgroundOpacity(0.9)
-        cap.SetFrame(False)
-        cap.SetLineSpacing(1.15)
-        self.txt_caption.SetPosition(0.5, 0.075)
-        for c in self.callouts:
-            tp = c["label"].GetTextProperty()
-            _style_text(tp, max(11, int(0.0175 * h)), c["color"], bold=True)
-            tp.SetBackgroundColor(1.0, 1.0, 1.0)
-            tp.SetBackgroundOpacity(0.88)
-            _style_text(c["dot"].GetTextProperty(), max(12, int(0.022 * h)), c["color"])
-        _style_text(self.txt_hint.GetTextProperty(), max(9, int(0.0145 * h)), MUTED)
-        self.txt_hint.GetTextProperty().SetJustificationToRight()
-        self.txt_hint.GetTextProperty().SetVerticalJustificationToBottom()
-        self.txt_hint.SetPosition(0.985, 0.018)
 
-        # Small horizontal legends side by side under the view name: wide enough to read, never a column.
+        # Small horizontal legends side by side at the top left: a title above each bar, the tick numbers
+        # under it. Each slot is as wide as its title needs (about 0.55 em per character).
         shown = [t for t in (CP_TITLE, SPEED_TITLE) if self.bars[t].GetVisibility()] or [K_TITLE]
-        bw, bh = min(0.24, 340.0 / w), max(0.075, 70.0 / h)
-        for title in (SPEED_TITLE, CP_TITLE, K_TITLE):
-            bar = self.bars[title]
-            slot = shown.index(title) if title in shown else 0
-            bar.SetPosition(0.018 + slot * (bw + 0.03), 0.92 - bh - 0.012)
+        bw, bh = min(0.24, 340.0 / w), max(0.07, 62.0 / h)
+        x, top = 0.022, 0.982
+        for title in self.bars:
+            actor = self.bar_titles[title]
+            _style_text(actor.GetTextProperty(), title_px, self.theme.text, bold=True)
+            actor.GetTextProperty().SetJustificationToLeft()
+            actor.GetTextProperty().SetVerticalJustificationToTop()
+        for title in shown:
+            bar, actor = self.bars[title], self.bar_titles[title]
+            slot = max(bw, 0.55 * title_px * len(title) / w)
+            actor.SetPosition(x, top)
+            bar.SetPosition(x, top - 1.5 * title_px / h - bh)
             bar.SetPosition2(bw, bh)
-            bar.SetBarRatio(0.28)
+            bar.SetBarRatio(0.40)
+            bar.SetTitleRatio(0.0)
             bar.SetMaximumWidthInPixels(int(bw * w))
-            _style_text(bar.GetTitleTextProperty(), title_px, TEXT, bold=True)
-            _style_text(bar.GetLabelTextProperty(), label_px, TEXT)
-            bar.SetVerticalTitleSeparation(int(0.9 * label_px))
-            bar.GetTitleTextProperty().SetJustificationToLeft()
-
-        for i, name in enumerate(TERM_NAMES):
-            actor = self.txt_terms[name]
-            _style_text(actor.GetTextProperty(), label_px, TERM_COLORS[name], bold=True)
-            actor.SetPosition(0.018, 0.88 - i * 0.04)
+            _style_text(bar.GetLabelTextProperty(), label_px, self.theme.text)
+            x += slot + 0.03
 
     def _apply_responsive_layout(self) -> None:
-        """Panel width and text size follow the window (1.0 = a 1920 x 1080 monitor)."""
+        """Bar and sidebar sizes follow the window (1.0 = a 1920 x 1080 monitor)."""
         s = min(self.width() / 1920.0, self.height() / 1080.0)
         s = min(max(s, 0.5), 1.4)
-        self.panel.setFixedWidth(int(min(PANEL_MAX_WIDTH, max(PANEL_MIN_WIDTH, 0.27 * self.width()))))
+        self.panel.setFixedWidth(int(min(PANEL_MAX_WIDTH, max(PANEL_MIN_WIDTH, 0.25 * self.width()))))
+        self.topbar.setFixedHeight(int(66 * s))
         margin = int(28 * s)
-        self.panel_layout.setContentsMargins(margin, int(26 * s), margin, 0)
-        self.panel.setStyleSheet(panel_style(s))
-        # On short windows the explanatory caption under the equation is dropped rather than squeezed
-        self.ns_panel.caption.setVisible(self.detailed and self.height() >= 820)
+        self.top_layout.setContentsMargins(margin, 0, margin, 0)
+        self.panel_layout.setContentsMargins(int(24 * s), int(28 * s), int(24 * s), int(24 * s))
+        for widget in (self.topbar, self.panel):
+            widget.setStyleSheet(panel_style(s, self.theme))
+        self.ns_panel.set_scale(s)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -914,6 +670,9 @@ class MonitorWindow(QMainWindow):
                 event.type() == QEvent.Wheel and event.modifiers() & (Qt.ControlModifier | Qt.MetaModifier)
             ):
                 self.controller.touch()  # dragging, pinching and zooming are visitors too
+                self._orbit_pause_until = time.monotonic() + ORBIT_PAUSE_SECONDS  # hold the camera while they use it
+            if event.type() == QEvent.MouseMove and event.buttons():
+                self._orbit_pause_until = time.monotonic() + ORBIT_PAUSE_SECONDS
             if event.type() == QEvent.KeyPress and self._route_key(event):
                 return True
             if event.type() == QEvent.Wheel and event.modifiers() & (Qt.ControlModifier | Qt.MetaModifier):

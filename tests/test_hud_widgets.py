@@ -85,15 +85,29 @@ def test_ns_panel_marks_dominant_term(qapp):
     panel = NsTermsPanel()
     panel.set_terms({"convective": 5.0, "pressure": 4000.0, "viscous": 0.2})
     assert panel.dominant == "pressure"
-    assert panel.equation_label.text() == EQUATION == "ρ(v·∇)v = −∇p + μ∇²v"
-    assert "◀" in panel.value_labels["pressure"].text()
-    assert "◀" not in panel.value_labels["convective"].text()
+    # the equation is the per-unit-mass form, the one the m/s² values belong to (solver/foam/ns_terms.py)
+    assert panel.equation_label.text() == EQUATION == "(v·∇)v = −(1/ρ)∇p + ν_eff ∇²v"
+    assert panel.rows["pressure"].property("dominant") is True
+    assert panel.rows["convective"].property("dominant") is False
+    assert panel.value_labels["pressure"].text() == "4,000"
+    assert panel.value_labels["viscous"].text() == "0.2"
     assert panel.bars["pressure"].value() > panel.bars["convective"].value() > panel.bars["viscous"].value()
-    assert "turbulent mixing" in panel.name_labels["viscous"].text()
     panel.set_terms({"convective": 9000.0, "pressure": 4000.0, "viscous": 0.2})
     assert panel.dominant == "convective"
+    assert panel.rows["convective"].property("dominant") is True and panel.rows["pressure"].property("dominant") is False
     panel.set_terms({"convective": 0.0, "pressure": 0.0, "viscous": 0.0})
     assert panel.dominant is None
+    assert panel.value_labels["convective"].text() == "—"
+
+
+def test_ns_panel_has_no_explanatory_text(qapp):
+    """The sidebar is symbols, numbers and units only."""
+    from PySide6.QtWidgets import QLabel
+
+    panel = NsTermsPanel()
+    panel.set_terms({"convective": 1640.0, "pressure": 2118.0, "viscous": 289.0})
+    words = [lb.text() for lb in panel.findChildren(QLabel) if lb.pixmap().isNull() and lb.text()]
+    assert sorted(set(words)) == sorted({"1,640", "2,118", "289", "m/s²"})
 
 
 def _wind_load(scale=1.0):

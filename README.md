@@ -26,13 +26,21 @@ python3 app/main.py --monitor-mode
 
 # Single Object Mode (Focused view on one object)
 python3 app/main.py --object airplane   # Options: airplane, f1_car, building, human
+
+# Look and remote
+python3 app/main.py --theme dark       # dark theme (T key or the iPad's moon button switches every screen)
+python3 app/main.py --ngrok            # iPad remote on the internet too; needs ngrok set up once (see CLAUDE.md)
+
+# Two computers: the host (macropad, iPad, idle show) and a follower that mirrors it
+python3 app/main.py --monitor-mode --objects airplane f1_car                       # on the host
+python3 app/main.py --monitor-mode --objects building --follow <host-ip>           # on the other Mac
 ```
 
 ---
 
 ## 🎮 Macropad, Keyboard & iPad Controls
 
-Every visitor input drives all 4 monitors at once. There are two controls: the **smoke wand** (10 heights) and the **wind-direction knob** (9 solved directions per object, blended in between).
+Every visitor input drives all 3 monitors at once. There are two controls: the **smoke wand** (10 heights) and the **wind-direction knob** (9 solved directions per object, blended in between).
 
 | Control | Macropad / keyboard input | Action |
 | :--- | :--- | :--- |

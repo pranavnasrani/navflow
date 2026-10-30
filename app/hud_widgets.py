@@ -22,6 +22,9 @@ from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QProgressBar, QSizePolicy, QVBoxLayout, QWidget
 
+from app.math_render import MathLabel
+from app.theme import LIGHT, Theme
+
 # --------------------------------------------------------------------------------------------------
 # Colours. Three fixed colours name the three Navier-Stokes terms everywhere (bars, streamlines in
 # view 2, the legend, the A2 poster). Chosen to stay apart for colour-blind viewers (Okabe-Ito family)
@@ -40,7 +43,15 @@ TERM_LABELS_2LINE = {
     "pressure": TERM_LABELS["pressure"],
     "viscous": "μ∇²v — viscous friction\n(incl. turbulent mixing, k-ω SST)",
 }
-EQUATION = "ρ(v·∇)v = −∇p + μ∇²v"
+# The momentum equation per unit mass, which is what the bars measure (m/s²): the convective term balances
+# the pressure term and the viscous term, with p / rho the kinematic pressure and nu_eff = nu + nut the
+# molecular plus turbulent viscosity (solver/foam/ns_terms.py).
+EQUATION = "(v·∇)v = −(1/ρ)∇p + ν_eff ∇²v"
+TERM_TEX = {
+    "convective": r"(\mathbf{v}\cdot\nabla)\mathbf{v}",
+    "pressure": r"-\frac{1}{\rho}\nabla p",
+    "viscous": r"\nu_{\mathrm{eff}}\nabla^{2}\mathbf{v}",
+}
 
 # Results-window theme (light report panel beside a gradient graphics window, like CFD post-processors)
 PANEL_BG = "#ECEEF1"
@@ -237,75 +248,114 @@ def _repolish(widget: QWidget) -> None:
 
 
 class NsTermsPanel(QFrame):
-    """The momentum equation with a log-scale bar per term; the largest term is set in bold and marked."""
+    """The momentum equation, typeset, and one row per term: its symbol, its current size and a log-scale bar.
+
+    The three term colours are the colours of the streamlines in view 2, so the row of the largest term
+    (tinted, with a thicker bar) tells which colour dominates the flow. No words: symbols, numbers, units."""
+
+    BAR_PX = 10
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("nsPanel")
         self.dominant: str | None = None
+        self.theme: Theme = LIGHT
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(6)
+        lay.setSpacing(10)
 
-        self.equation_label = _role(QLabel(EQUATION), "equation")
+        self.equation_label = MathLabel(self._equation_pieces(), base_px=31, plain=EQUATION)
         lay.addWidget(self.equation_label)
-
-        self.caption = _role(QLabel("size of each term near the model, per unit mass (m/s², log scale)"), "small")
-        self.caption.setWordWrap(True)
-        lay.addWidget(self.caption)
+        lay.addSpacing(8)
 
         self.rows: dict[str, QFrame] = {}
         self.bars: dict[str, QProgressBar] = {}
         self.value_labels: dict[str, QLabel] = {}
-        self.name_labels: dict[str, QLabel] = {}
+        self.unit_labels: dict[str, QLabel] = {}
+        self.term_labels: dict[str, MathLabel] = {}
         for name in TERM_NAMES:
             row = QFrame()
             row.setObjectName(f"row_{name}")
+            row.setProperty("role", "nsRow")
+            row.setProperty("term", name)
+            row.setProperty("dominant", False)
+            row.setAttribute(Qt.WA_StyledBackground, True)
             rl = QVBoxLayout(row)
-            rl.setContentsMargins(0, 2, 0, 2)
-            rl.setSpacing(3)
+            rl.setContentsMargins(14, 12, 14, 14)
+            rl.setSpacing(8)
 
-            title = _role(QLabel(TERM_LABELS_2LINE[name]), "term")
-            title.setStyleSheet(f"color: {TERM_COLORS[name]};")
-            rl.addWidget(title)
+            head = QHBoxLayout()
+            head.setSpacing(6)
+            term = MathLabel([(TERM_TEX[name], self.theme.term_colors[name])], base_px=28, plain=TERM_LABELS[name])
+            head.addWidget(term)
+            head.addStretch(1)
+            val = _role(QLabel("—"), "nsValue")
+            val.setAlignment(Qt.AlignRight | Qt.AlignBottom)
+            unit = _role(QLabel("m/s²"), "nsUnit")
+            unit.setAlignment(Qt.AlignLeft | Qt.AlignBottom)
+            head.addWidget(val, alignment=Qt.AlignBottom)
+            head.addWidget(unit, alignment=Qt.AlignBottom)
+            rl.addLayout(head)
 
             bar = QProgressBar()
             bar.setObjectName(f"bar_{name}")
             bar.setRange(0, 100)
             bar.setTextVisible(False)
-            bar.setFixedHeight(8)
-            bar.setStyleSheet(
-                f"QProgressBar {{ background-color: #D6DBE1; border: none; border-radius: 0px; }}"
-                f"QProgressBar::chunk {{ background-color: {TERM_COLORS[name]}; border-radius: 0px; }}"
-            )
-            val = _role(QLabel("—"), "termValue")
-            val.setMinimumWidth(130)
-            val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-
-            line = QGridLayout()
-            line.setContentsMargins(0, 0, 0, 0)
-            line.setHorizontalSpacing(10)
-            line.addWidget(bar, 0, 0)
-            line.addWidget(val, 0, 1)
-            line.setColumnStretch(0, 1)
-            rl.addLayout(line)
+            bar.setFixedHeight(self.BAR_PX)
+            rl.addWidget(bar)
 
             lay.addWidget(row)
-            self.rows[name], self.bars[name], self.value_labels[name], self.name_labels[name] = row, bar, val, title
+            self.rows[name], self.bars[name], self.value_labels[name] = row, bar, val
+            self.unit_labels[name], self.term_labels[name] = unit, term
+        lay.addStretch(1)
+        self.set_scale(1.0)
+
+    def _equation_pieces(self) -> list[tuple[str, str]]:
+        c = self.theme.term_colors
+        return [(TERM_TEX["convective"], c["convective"]), ("=", self.theme.text),
+                (TERM_TEX["pressure"], c["pressure"]), ("+", self.theme.text),
+                (TERM_TEX["viscous"], c["viscous"])]
+
+    def set_theme(self, theme: Theme) -> None:
+        """Recolour the typeset terms and the bars (the row tints and value colours come from the style sheet)."""
+        self.theme = theme
+        self.equation_label.set_segments(self._equation_pieces())
+        for name, term in self.term_labels.items():
+            term.set_segments([(TERM_TEX[name], theme.term_colors[name])])
+        self.set_scale(getattr(self, "_scale", 1.0))
+
+    def set_scale(self, s: float) -> None:
+        """Panel scale (1.0 = a 1920 x 1080 monitor): typeset maths and bar thickness follow it."""
+        for m in (self.equation_label, *self.term_labels.values()):
+            m.set_scale(s)
+        for name, bar in self.bars.items():
+            thick = int(round(self.BAR_PX * s * (1.3 if name == self.dominant else 1.0)))
+            bar.setFixedHeight(max(6, thick))
+            radius = max(3, thick // 2)
+            bar.setStyleSheet(
+                f"QProgressBar {{ background-color: {self.theme.track}; border: none; border-radius: {radius}px; }}"
+                f"QProgressBar::chunk {{ background-color: {self.theme.term_colors[name]}; border-radius: {radius}px; }}"
+            )
+        self._scale = s
 
     def set_terms(self, terms: dict[str, float]) -> None:
-        """Update the three bars from {'convective', 'pressure', 'viscous'} (m/s²)."""
+        """Update the three rows from {'convective', 'pressure', 'viscous'} (m/s²)."""
         values = {n: _num(terms, n) for n in TERM_NAMES}
+        previous = self.dominant
         self.dominant = max(TERM_NAMES, key=lambda n: values[n]) if any(v > 0 for v in values.values()) else None
         for name in TERM_NAMES:
             v = values[name]
             self.bars[name].setValue(log_bar_value(v))
+            self.value_labels[name].setText((f"{v:,.0f}" if v >= 100 else f"{v:.3g}") if v > 0 else "—")
             is_dom = name == self.dominant
-            text = (f"{v:,.0f} m/s²" if v >= 100 else f"{v:.3g} m/s²") if v > 0 else "—"
-            self.value_labels[name].setText(text + ("  ◀ largest" if is_dom else ""))
-            self.value_labels[name].setProperty("dominant", is_dom)
-            _repolish(self.value_labels[name])
+            if self.rows[name].property("dominant") != is_dom:
+                self.rows[name].setProperty("dominant", is_dom)
+                self.value_labels[name].setProperty("dominant", is_dom)
+                _repolish(self.rows[name])
+                _repolish(self.value_labels[name])
+        if previous != self.dominant:
+            self.set_scale(getattr(self, "_scale", 1.0))  # the largest term's bar is a little thicker
 
 
 # --------------------------------------------------------------------------------------------------

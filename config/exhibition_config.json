@@ -162,6 +162,7 @@
     },
     {
       "id": "human",
+      "display": false,
       "display_name": "Bluff Body (Human Form)",
       "category": "Baseline Benchmark",
       "monitor_index": 3,

@@ -146,7 +146,7 @@ def test_get_state_json(server, controller):
     status, body, headers = request(server, "GET", "/state")
     assert status == 200
     assert headers["Content-Type"].startswith("application/json")
-    assert json.loads(body) == {"wand": 2, "knob": 0.75, "view": 1, "wand_count": 10}
+    assert json.loads(body) == {"wand": 2, "knob": 0.75, "view": 1, "dark": False, "wand_count": 10}
 
 
 def test_get_index_is_self_contained_html(server):
@@ -154,7 +154,7 @@ def test_get_index_is_self_contained_html(server):
     assert status == 200
     assert headers["Content-Type"].startswith("text/html")
     html = body.decode("utf-8")
-    assert "<svg" in html and 'type="range"' in html
+    assert "<svg" in html and html.count('data-wand="') == 10 and html.count('data-view="') == 3
     assert body == INDEX_HTML.read_bytes()
     # No external assets: nothing may be loaded from another host.
     assert not re.findall(r"""(?:src|href)\s*=\s*["']\s*(?:https?:)?//""", html)
@@ -281,3 +281,38 @@ def test_lan_ip_loopback_when_nothing_works(monkeypatch):
     monkeypatch.setattr(remote_server, "_probe_route", lambda target: None)
     monkeypatch.setattr(remote_server, "_hostname_addresses", lambda: ["127.0.1.1"])
     assert remote_server.lan_ip() == "127.0.0.1"
+
+
+# ---- theme, and what makes the page installable on an iPad ---------------------------------------
+
+def test_theme_command_switches_the_controller_and_shows_in_state(server, controller):
+    assert post_cmd(server, {"kind": "theme", "value": 1})[0] == 204
+    assert pump(lambda: controller.theme == "dark")
+    assert json.loads(request(server, "GET", "/state")[1])["dark"] is True
+    assert post_cmd(server, {"kind": "theme", "value": 0})[0] == 204
+    assert pump(lambda: controller.theme == "light")
+
+
+def test_manifest_makes_the_page_a_standalone_app(server):
+    status, body, headers = request(server, "GET", "/manifest.webmanifest")
+    assert status == 200 and headers["Content-Type"].startswith("application/manifest+json")
+    manifest = json.loads(body)
+    assert manifest["display"] == "standalone"        # no browser tab bar when opened from the Home Screen
+    assert manifest["start_url"] == "/" and manifest["short_name"] == "NavFlow"
+    assert {i["sizes"] for i in manifest["icons"]} >= {"192x192", "512x512"}
+    for icon in manifest["icons"]:                    # every icon the manifest names is really served
+        s, png, h = request(server, "GET", icon["src"])
+        assert s == 200 and h["Content-Type"] == "image/png" and png.startswith(b"\x89PNG")
+
+
+def test_page_links_the_manifest_and_the_home_screen_icon(server):
+    html = request(server, "GET", "/")[1].decode()
+    assert '<link rel="manifest" href="/manifest.webmanifest">' in html
+    assert '<link rel="apple-touch-icon" href="/icon-180.png">' in html
+    assert 'name="apple-mobile-web-app-capable" content="yes"' in html
+    status, png, _ = request(server, "GET", "/icon-180.png")
+    assert status == 200 and png[16:24] == (180).to_bytes(4, "big") + (180).to_bytes(4, "big")  # IHDR width, height
+
+
+def test_unknown_asset_is_404(server):
+    assert request(server, "GET", "/icon-999.png")[0] == 404

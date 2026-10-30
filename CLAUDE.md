@@ -1,6 +1,6 @@
 # CLAUDE.md — Agent & Developer Guide
 
-This repository contains an interactive, native 4-monitor 3D Computational Fluid Dynamics (CFD) simulation system for the **Math section of a STEM Exhibition**. It demonstrates the power of the **Navier-Stokes equations** applied to aerodynamics and sustainability.
+This repository contains an interactive, native 3-monitor 3D Computational Fluid Dynamics (CFD) simulation system for the **Math section of a STEM Exhibition**. It demonstrates the power of the **Navier-Stokes equations** applied to aerodynamics and sustainability.
 
 ---
 
@@ -17,11 +17,11 @@ This repository contains an interactive, native 4-monitor 3D Computational Fluid
    - **Motorsport & Automotive (Monitor 2 - F1 Car)**: Cutting frontal surface area ($A_{\text{front}}$) and managing ground effect downforce to slash the cubic aerodynamic drag power:
      $$P_{\text{drag}} = F_{\text{drag}} \cdot V = \frac{1}{2} \rho C_d A_{\text{front}} V^3$$
    - **Sustainable Architecture (Monitor 3 - Skyscraper)**: High-altitude wind loading, mitigating vortex shedding, and reducing structural material and HVAC wind infiltration.
-   - **Benchmark Bluff Body (Monitor 4 - Human)**: Shows severe flow separation, massive turbulent wake eddies, and high drag of unstreamlined shapes compared to engineered geometries.
+   - ~~Benchmark Bluff Body (Human)~~: dropped from the exhibit; its results are still in the caches.
 
 3. **Interactive Hardware Setup**:
-   - **4 Independent Monitors**: One monitor window per object.
-   - **1 USB HID Macropad** (keyboard keystrokes) controlling all 4 monitors at once, plus an **iPad remote** (touch page served by the app over local HTTP; the display itself stays native):
+   - **3 Independent Monitors**: One monitor window per object (airplane, F1 car, skyscraper). The human bluff body was dropped from the exhibit on 2026-10-30: it is still solved and cached, and `"display": false` on its entry in `config/exhibition_config.json` keeps it off the screens (flip it to bring it back).
+   - **1 USB HID Macropad** (keyboard keystrokes) controlling all 3 monitors at once, plus an **iPad remote** (touch page served by the app over local HTTP; the display itself stays native):
      - **10 Buttons**: the **smoke wand** height (10 steps), a rake of streamline seeds you move through the flow.
      - **1 Rotary Knob**: **wind direction** across 9 solved directions per object, blended by 0606 linear interpolation. The direction is a different quantity per object (airplane = angle of attack, F1 car = crosswind yaw, building = wind bearing, human = body angle).
      - **Tab**: cycle the view (surface pressure / dominant Navier-Stokes term / turbulence k).
@@ -47,11 +47,20 @@ This repository contains an interactive, native 4-monitor 3D Computational Fluid
 # Tests (the suite is expected to pass without Docker; tests marked `docker` need Docker Desktop)
 ./.venv/bin/python -m pytest -q -m "not docker"
 
-# Launch (dev: 2x2 grid on this screen; --monitor-mode: 4 fullscreen windows on 4 monitors)
+# Launch (dev: windows tiled on this screen; --monitor-mode: one fullscreen window per monitor)
 ./run_exhibition.sh                      # = app/main.py --dev-mode
 ./run_exhibition.sh --monitor-mode
 ./.venv/bin/python app/main.py --object airplane   # airplane | f1_car | building | human
-./.venv/bin/python app/main.py --no-remote         # skip the iPad remote
+./.venv/bin/python app/main.py --no-remote         # skip the iPad remote (and the second-computer link)
+./.venv/bin/python app/main.py --theme dark         # start in the dark theme (T key or the iPad's moon button switches all screens)
+./.venv/bin/python app/main.py --orbit 90          # seconds per camera circle round each model (default 60, 0 = hold still)
+./run_exhibition.sh --ngrok                        # also put the iPad remote on the internet (ngrok); --ngrok NAME.ngrok-free.app for your reserved domain
+
+# Two computers: the host owns the macropad, the iPad page and the idle show; the follower mirrors it.
+./run_exhibition.sh --monitor-mode --objects airplane f1_car                  # host: monitors 1 and 2
+./run_exhibition.sh --monitor-mode --objects building --follow 192.168.1.20   # other Mac: monitor 1
+#   --objects picks the windows this computer opens; --screens 2 1 sends them to monitors 2 and 1 (1 = first);
+#   --follow HOST[:PORT] makes this computer the follower. The host prints the follow command with its own IP.
 
 # 1. Prepare a downloaded model (STL/OBJ/PLY, or GLB/GLTF/BLEND/FBX via headless Blender) -> assets/models/<id>/model.stl + preview.png
 #    --wrap RES shrink-wraps display models made of open parts (cube = longest side / RES); --drop skips Blender objects by name prefix.
@@ -75,7 +84,14 @@ This repository contains an interactive, native 4-monitor 3D Computational Fluid
 ### iPad remote
 `app/main.py` serves a touch page on `controls.remote_port` (8765) and prints the URL (`http://<lan-ip>:8765/`) in the terminal and on each window. Open it in Safari on any device on the same Wi-Fi or phone hotspot. If the port is busy the app prints a warning and runs without the remote. The server lives in `app/remote_server.py`; the page is the single file `app/remote/index.html`.
 
-### Two machines (laptop + Mac mini)
+### iPad remote as an app (PWA) and ngrok
+The remote page is installable: `app/remote/manifest.webmanifest` (display `standalone`), `icon-180/192/512.png` (drawn by `scripts/make_remote_icons.py`) and the `apple-*` meta tags in `index.html`, all served by `app/remote_server.py`. Opened from the Home Screen it has no Safari tab bar. To install: open the remote's address in **Safari** on the iPad, Share, **Add to Home Screen**.
+`--ngrok [DOMAIN]` (`app/tunnel.py`) runs `ngrok http <remote_port>` and prints the public https address, for networks where devices cannot see each other. One-time setup: `brew install ngrok` (done on this Mac), then `ngrok config add-authtoken <token>` with the token from dashboard.ngrok.com. A free **reserved domain** (dashboard, Domains) keeps the address the same every day, so the Home Screen icon keeps working; without one the address changes each run and the icon must be re-added. ngrok's free tier may show a one-time notice page on first open (tap Visit Site). Anyone with the address can use the controls, so keep it private.
+
+### Showing on two computers
+One process per computer, same code and same `assets/cache/` on both (`scripts/sync_to_mini.sh` copies the project). The **host** (no `--follow`) opens its `--objects` windows and also owns every control: macropad, iPad page (port 8765), idle show. The **follower** (`--follow <host-ip>`) opens the other objects and mirrors the host: `app/follower.py` polls `GET /sync` about 25 times a second and applies it with `ExhibitionInputController.apply_sync`, so the windows move together. Keys, wheel and drags on the follower are sent to the host (`POST /cmd`), so a keyboard on either Mac works; a macropad should be plugged into the host. If the host stops, follower windows keep their last picture and keep retrying. Both computers must be on the same network; the iPad page is opened at the host's URL. Start the host first (the follower retries anyway).
+
+### Two machines for OpenFOAM runs (laptop + Mac mini)
 Each machine keeps its own queue file `runs/full/queue_<machine>.json`, chosen with `--machine` (default `laptop`). **On the mini always pass `--machine mini`** (for `run`, `stop` and `status`), e.g. `run_openfoam.py run --objects building human --machine mini`; `pull_from_mini.sh` also refuses to copy `queue_laptop.json`, so the laptop's queue is never overwritten.
 ```bash
 ./scripts/sync_to_mini.sh     # rsync the project to $MINI_HOST (default the mini's Tailscale IP 100.114.120.115), excluding .venv, runs, .git
@@ -118,8 +134,12 @@ navflow/
 │   ├── cache_format.py             # Cache format v2 read/write
 │   ├── state_manager.py            # RAM cache + linear interpolation
 │   ├── input_controller.py         # Keyboard / macropad -> (wand, knob, view) state
-│   ├── remote_server.py            # iPad remote HTTP server; app/remote/index.html is the page
-│   ├── monitor_window.py           # Native PySide6 + PyVista window (three views, N-S bars, SDG widgets)
+│   ├── remote_server.py            # iPad remote HTTP server (+ /sync for a second computer); app/remote/index.html is the page
+│   ├── follower.py                 # --follow: mirrors a host computer's controller, forwards local input to it
+│   ├── monitor_window.py           # Native PySide6 + PyVista window: top bar with a tab per view, 3D flow, sidebar with the N-S terms
+│   ├── theme.py                    # Light and dark colour themes (window, sidebar, term colours, model grey)
+│   ├── tunnel.py                   # --ngrok: public https address for the iPad remote
+│   ├── math_render.py              # Typeset maths (matplotlib mathtext, STIX) as pictures for the sidebar
 │   └── hud_widgets.py              # HUD building blocks
 ├── tests/                          # pytest suite
 └── runs/                           # OpenFOAM case results (git-ignored): preview/, full/, test/
@@ -145,10 +165,11 @@ navflow/
    - `1`-`9`, `0`: smoke wand to height 1 to 10.
    - `Up` / `Down` or `W` / `S`: step the wand up/down.
    - Wind-direction knob, clockwise (next direction): `Right`, `D`, `+`, `=`, `]`. Anticlockwise: `Left`, `A`, `-`, `_`, `[`. The mouse wheel also turns it (one notch = one detent of `knob_step`).
-   - `Tab`: cycle view. `Space`: simple / detailed instrument strip (starts simple). `R`: reset every camera.
+   - `Tab` (or clicking a tab in the top bar, or the iPad): cycle the view. `R`: reset every camera. `T`: light / dark theme on every screen (`app/theme.py`). `Space` is still read by the controller but no screen uses it any more.
    - Camera: drag to turn; trackpad pinch or Cmd + scroll to zoom (plain scroll stays the knob). There is no key to quit.
-   - **Challenge** (`MISSIONS` in `app/explainers.py`, `MissionPanel` in `app/hud_widgets.py`): the simple panel asks one question per object (plane: best lift/drag, 6°; car: least fuel in crosswind, 6°; tower: hardest total sideways push sqrt(drag² + side²), 7.5°), shows one big live number read off the straight line between runs, a graph of all nine runs with the visitor's dot, a which-way hint, and "You found it!" within half a step of the answer. A test checks each message's angle against the caches.
-   - **Idle show** (`app/explainers.py`, `ExhibitionInputController`): after `controls.idle_seconds` (default 25, 0 = off) without input, and at start-up, a six-step show runs on all screens: the knob eases between positions (smoothstep), the wand and view change, the camera swings +-22 degrees, and each object shows a plain-English caption per step. Labels pinned to the highest and lowest surface pressure show in view 1. Any key, wheel, drag, pinch, macropad or iPad input stops it. Every number in a caption must come from the solved results.
+   - **Screen layout** (`MonitorWindow`, decided 2026-10-30): a top bar (object name + one tab per view: Velocity & pressure, Navier-Stokes, Turbulence) and a right sidebar with the three terms of the momentum equation. **No explanatory text anywhere on the screen**: no captions, callouts, challenge, hints, forces or sustainability lines. The sidebar is the equation typeset in its per-unit-mass form `(v·∇)v = −(1/ρ)∇p + ν_eff ∇²v` (the form the m/s² values belong to; `solver/foam/ns_terms.py`), then one row per term: symbol, current size, log-scale bar. The row of the largest term is tinted. Term colours are the streamline colours of view 2. `MissionPanel`, `SustainabilityOverlay`, `MISSIONS` and the captions in `app/explainers.py` are still in the repo (tested) but no window uses them.
+   - **Camera orbit**: every camera circles its model all the time (`MonitorWindow._orbit_tick`: a turntable about the upright axis, 60 s per turn, fixed ~10 degree pitch, ~30 frames a second). A mouse or touch drag, pinch or zoom holds it still for 8 s. `--orbit 0` turns it off. The windows are no longer idle for the GPU: check the load on the exhibit Macs.
+   - **Idle show** (`app/explainers.py`, `ExhibitionInputController`): after `controls.idle_seconds` (default 25, 0 = off) without input, and at start-up, a six-step show runs on all screens: the knob eases between positions (smoothstep), the wand and view change (the tabs follow). Any key, wheel, drag, pinch, macropad or iPad input stops it.
    - Smoke shows at all 10 wand heights: the selected height bright, the other nine faint (`ObjectStateManager.wand_lines`).
 
 5. **Linear interpolation (0606)**:

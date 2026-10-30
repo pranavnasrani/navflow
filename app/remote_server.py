@@ -5,8 +5,12 @@ The display stays a native PySide6 + PyVista app; this module only lets a tablet
 Wi-Fi / phone hotspot drive the same three inputs as the macropad:
 
     GET  /       the single-file touch page (app/remote/index.html, no external assets)
+    GET  /manifest.webmanifest, /icon-180.png, /icon-192.png, /icon-512.png   install-as-app files (PWA)
     GET  /state  {"wand", "knob", "view", "wand_count"}   (wand is 0-based, like the controller)
-    POST /cmd    {"kind": "wand"|"knob"|"view", "value": number}  -> 204, or 400 if rejected
+    GET  /sync   the controller's full snapshot (adds detailed, show_active, show_step, reset_count);
+                 a second Mac started with --follow polls this to mirror the host
+    POST /cmd    {"kind": "wand"|"knob"|"view"|"detail"|"reset"|"touch"|"theme", "value": number}  -> 204, or 400
+                 (detail: 1 = detailed strip, 0 = simple; theme: 1 = dark, 0 = light; reset and touch ignore the value)
 
 Thread safety: HTTP requests are served on worker threads, but Qt objects belong to the GUI
 thread. So a handler never touches the controller's methods; it emits `RemoteServer.command`,
@@ -32,9 +36,17 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, Signal
 
-INDEX_PATH = Path(__file__).resolve().parent / "remote" / "index.html"
+REMOTE_DIR = Path(__file__).resolve().parent / "remote"
+INDEX_PATH = REMOTE_DIR / "index.html"
+# What makes the page installable on an iPad's Home Screen: a manifest and icons, served next to the page.
+ASSETS = {
+    "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json"),
+    "/icon-180.png": ("icon-180.png", "image/png"),   # <link rel="apple-touch-icon">
+    "/icon-192.png": ("icon-192.png", "image/png"),
+    "/icon-512.png": ("icon-512.png", "image/png"),
+}
 MAX_BODY_BYTES = 1024
-COMMAND_KINDS = ("wand", "knob", "view")
+COMMAND_KINDS = ("wand", "knob", "view", "detail", "reset", "touch", "theme")
 
 
 def parse_command(body: bytes) -> tuple[str, float]:
@@ -171,9 +183,14 @@ class _Handler(BaseHTTPRequestHandler):
                 "wand": int(c.current_wand_index),
                 "knob": float(c.current_knob),
                 "view": int(c.current_view),
+                "dark": c.theme == "dark",
                 "wand_count": int(c.wand_count),
             }
             self._reply(200, json.dumps(state).encode(), "application/json")
+        elif path in ASSETS:
+            self._reply(200, remote.assets[path], ASSETS[path][1])
+        elif path == "/sync":
+            self._reply(200, json.dumps(remote.controller.snapshot()).encode(), "application/json")
         else:
             self._reply(404, b"not found")
 
@@ -209,6 +226,7 @@ class RemoteServer(QObject):
         self.controller = controller
         self.port = port
         self.index_html = b""
+        self.assets: dict[str, bytes] = {}
         self._httpd = None
         self._thread = None
         # QueuedConnection: the emit happens on an HTTP worker thread, the slot runs on this
@@ -224,6 +242,14 @@ class RemoteServer(QObject):
                 self.controller.set_knob(value)
             elif kind == "view":
                 self.controller.set_view(int(value))
+            elif kind == "detail":
+                self.controller.set_detail(value >= 0.5)
+            elif kind == "reset":
+                self.controller.request_camera_reset()
+            elif kind == "touch":
+                self.controller.touch()
+            elif kind == "theme":
+                self.controller.set_theme("dark" if value >= 0.5 else "light")
         except Exception as exc:  # never let a remote command take the exhibit down
             print(f"[remote] ignored {kind} command: {exc}")
 
@@ -232,6 +258,7 @@ class RemoteServer(QObject):
         if self._httpd is not None:
             return self._url()
         self.index_html = INDEX_PATH.read_bytes()
+        self.assets = {route: (REMOTE_DIR / name).read_bytes() for route, (name, _) in ASSETS.items()}
         try:
             httpd = ThreadingHTTPServer(("0.0.0.0", self.port), _Handler)
         except OSError as exc:
