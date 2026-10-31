@@ -10,7 +10,7 @@ import pytest
 from PySide6.QtCore import QCoreApplication
 from PySide6.QtWidgets import QApplication
 
-from app.follower import FollowerLink, parse_host
+from app.follower import FollowerLink, parse_follow, parse_host
 from app.input_controller import ExhibitionInputController
 from app.main import tile
 from app.remote_server import RemoteServer
@@ -43,6 +43,22 @@ def pump(predicate, timeout=3.0):
 ])
 def test_parse_host(text, expected):
     assert parse_host(text, 8765) == expected
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("192.168.1.5", ("192.168.1.5", 8765, False)),
+    ("http://192.168.1.5:9000/", ("192.168.1.5", 9000, False)),
+    ("https://abc-def.ngrok-free.dev", ("abc-def.ngrok-free.dev", 443, True)),
+    ("HTTPS://abc-def.ngrok-free.dev/", ("abc-def.ngrok-free.dev", 443, True)),
+    ("https://abc-def.ngrok-free.dev:8443", ("abc-def.ngrok-free.dev", 8443, True)),
+])
+def test_parse_follow(text, expected):
+    assert parse_follow(text, 8765) == expected
+
+
+def test_follower_url_for_https_and_http():
+    assert FollowerLink(None, "x.ngrok-free.dev", 443, secure=True).url == "https://x.ngrok-free.dev/"
+    assert FollowerLink(None, "10.0.0.2", 8765).url == "http://10.0.0.2:8765/"
 
 
 @pytest.mark.parametrize("text", ["", "http://", ":8765", "host:", "host:abc", "host:0", "host:70000"])

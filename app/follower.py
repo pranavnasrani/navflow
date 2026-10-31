@@ -22,7 +22,9 @@ import time
 from PySide6.QtCore import QObject, Qt, Signal
 
 POLL_SECONDS = 0.04        # 25 snapshots a second: the knob glide in the idle show moves at 15 a second
+TUNNEL_POLL_SECONDS = 0.1  # through the internet (ngrok) 10 a second: kinder to its free bandwidth allowance
 TIMEOUT_SECONDS = 1.0
+TUNNEL_TIMEOUT_SECONDS = 3.0   # the first https request also has to set up TLS
 RETRY_SECONDS = 1.0
 TOUCH_GAP_SECONDS = 0.5    # a visitor's "I'm here" only needs sending now and then
 
@@ -44,15 +46,29 @@ def parse_host(text: str, default_port: int) -> tuple[str, int]:
     return host, int(port)
 
 
+def parse_follow(text: str, default_port: int) -> tuple[str, int, bool]:
+    """Like parse_host, plus whether to use https: 'https://name.ngrok-free.dev' -> (name, 443, True).
+
+    A venue network that stops devices talking to each other blocks the plain 'host:8765' link, but an
+    https address (the host's ngrok address) goes out through the internet and works anywhere.
+    """
+    text = text.strip()
+    secure = text.lower().startswith("https://")
+    if secure:
+        text = "https://" + text[len("https://"):]  # parse_host only strips a lower-case scheme
+    host, port = parse_host(text, 443 if secure else default_port)
+    return host, port, secure
+
+
 class FollowerLink(QObject):
     """Mirrors a host controller into `controller` and sends the follower's own input to the host."""
 
     synced = Signal(dict)  # worker thread -> GUI thread
 
-    def __init__(self, controller, host: str, port: int):
+    def __init__(self, controller, host: str, port: int, secure: bool = False):
         super().__init__()
         self.controller = controller
-        self.host, self.port = host, port
+        self.host, self.port, self.secure = host, port, secure
         self.connected = False
         self._stop = threading.Event()
         self._outbox: "queue.Queue[tuple[str, float]]" = queue.Queue()
@@ -62,7 +78,8 @@ class FollowerLink(QObject):
 
     @property
     def url(self) -> str:
-        return f"http://{self.host}:{self.port}/"
+        scheme, default = ("https", 443) if self.secure else ("http", 80)
+        return f"{scheme}://{self.host}" + ("" if self.port == default else f":{self.port}") + "/"
 
     def start(self):
         """Route this controller's input to the host and start mirroring it."""
@@ -95,7 +112,14 @@ class FollowerLink(QObject):
 
     # -- worker threads --------------------------------------------------------------------------
     def _connection(self) -> http.client.HTTPConnection:
+        if self.secure:
+            return http.client.HTTPSConnection(self.host, self.port, timeout=TUNNEL_TIMEOUT_SECONDS)
         return http.client.HTTPConnection(self.host, self.port, timeout=TIMEOUT_SECONDS)
+
+    @property
+    def _headers(self) -> dict:
+        # ngrok's free tier answers browsers with a notice page; this header skips it for our requests
+        return {"ngrok-skip-browser-warning": "1"} if self.secure else {}
 
     def _set_connected(self, up: bool):
         if up != self.connected:
@@ -107,7 +131,7 @@ class FollowerLink(QObject):
         conn = self._connection()
         while not self._stop.is_set():
             try:
-                conn.request("GET", "/sync")
+                conn.request("GET", "/sync", headers=self._headers)
                 reply = conn.getresponse()
                 body = reply.read()
                 if reply.status != 200:
@@ -115,7 +139,7 @@ class FollowerLink(QObject):
                 snap = json.loads(body)
                 self._set_connected(True)
                 self.synced.emit(snap)
-                self._stop.wait(POLL_SECONDS)
+                self._stop.wait(TUNNEL_POLL_SECONDS if self.secure else POLL_SECONDS)
             except (OSError, http.client.HTTPException, ValueError):
                 self._set_connected(False)
                 conn.close()
@@ -132,7 +156,7 @@ class FollowerLink(QObject):
                 continue
             body = json.dumps({"kind": kind, "value": value}).encode()
             try:
-                conn.request("POST", "/cmd", body=body, headers={"Content-Type": "application/json"})
+                conn.request("POST", "/cmd", body=body, headers={"Content-Type": "application/json", **self._headers})
                 conn.getresponse().read()
             except (OSError, http.client.HTTPException):
                 conn.close()

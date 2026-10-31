@@ -36,7 +36,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from PySide6.QtWidgets import QApplication
 
 from app.cache_format import read_cache
-from app.follower import FollowerLink, parse_host
+from app.follower import FollowerLink, parse_follow
 from app.input_controller import ExhibitionInputController
 from app.monitor_window import MonitorWindow
 from app.remote_server import RemoteServer, lan_ip
@@ -95,8 +95,8 @@ def main():
                         help="Seconds the camera takes to circle each model (default 60; 0 = hold still)")
     parser.add_argument("--ngrok", nargs="?", const="", default=None, metavar="DOMAIN",
                         help="Also put the iPad remote on the internet through ngrok; DOMAIN is your reserved ngrok domain, if any")
-    parser.add_argument("--follow", type=str, default=None, metavar="HOST[:PORT]",
-                        help="Run as the second computer: mirror the host Mac at this address instead of owning the controls")
+    parser.add_argument("--follow", type=str, default=None, metavar="HOST[:PORT]|https://URL",
+                        help="Run as the second computer: mirror the host Mac at this address (or its https ngrok address, which works on any network) instead of owning the controls")
     parser.add_argument("--config", type=str, default="config/exhibition_config.json", help="Path to config file")
     parser.add_argument("--no-remote", action="store_true", help="Do not start the iPad remote web server")
     parser.add_argument("--cache-dir", type=str, default="assets/cache", help="Folder holding <object>_states.npz")
@@ -139,7 +139,7 @@ def main():
     follow = None
     if args.follow:
         try:
-            follow = parse_host(args.follow, int(config["controls"]["remote_port"]))
+            follow = parse_follow(args.follow, int(config["controls"]["remote_port"]))
         except ValueError as exc:
             print(f"Error: --follow {args.follow!r}: {exc}")
             sys.exit(1)
