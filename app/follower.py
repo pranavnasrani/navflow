@@ -46,17 +46,44 @@ def parse_host(text: str, default_port: int) -> tuple[str, int]:
     return host, int(port)
 
 
+def is_url(text: str) -> bool:
+    """True if text is a web URL or domain name rather than a raw LAN IP/hostname."""
+    lower = text.strip().lower()
+    if lower.startswith("http://") or lower.startswith("https://"):
+        return True
+    host = lower.split("/")[0].split(":")[0]
+    parts = host.split(".")
+    if len(parts) == 4 and all(p.isdigit() for p in parts):
+        return False
+    if host in ("localhost", "127.0.0.1") or host.endswith(".local"):
+        return False
+    return "." in host and any(c.isalpha() for c in host)
+
+
 def parse_follow(text: str, default_port: int) -> tuple[str, int, bool]:
     """Like parse_host, plus whether to use https: 'https://name.ngrok-free.dev' -> (name, 443, True).
 
     A venue network that stops devices talking to each other blocks the plain 'host:8765' link, but an
-    https address (the host's ngrok address) goes out through the internet and works anywhere.
+    https address (or tunnel/proxy URL) goes out through the internet and works anywhere.
+    Public URLs/tunnels forward to the host's local port and do not open port 8765 on the public internet,
+    so for all URLs port 8765 is removed and replaced with standard web ports (443 for https, 80 for http).
     """
     text = text.strip()
-    secure = text.lower().startswith("https://")
-    if secure:
-        text = "https://" + text[len("https://"):]  # parse_host only strips a lower-case scheme
-    host, port = parse_host(text, 443 if secure else default_port)
+    is_https = text.lower().startswith("https://")
+    is_http = text.lower().startswith("http://")
+    is_ngrok = "ngrok" in text.lower()
+    url_target = is_https or is_http or is_url(text)
+
+    secure = is_https or is_ngrok or (url_target and not is_http)
+    if is_https:
+        text = text[len("https://"):]
+    elif is_http:
+        text = text[len("http://"):]
+
+    std_port = 443 if secure else 80
+    host, port = parse_host(text, std_port if url_target else default_port)
+    if url_target and (port == default_port or port == 8765):
+        port = std_port
     return host, port, secure
 
 

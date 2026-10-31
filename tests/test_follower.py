@@ -51,6 +51,18 @@ def test_parse_host(text, expected):
     ("https://abc-def.ngrok-free.dev", ("abc-def.ngrok-free.dev", 443, True)),
     ("HTTPS://abc-def.ngrok-free.dev/", ("abc-def.ngrok-free.dev", 443, True)),
     ("https://abc-def.ngrok-free.dev:8443", ("abc-def.ngrok-free.dev", 8443, True)),
+    ("abc-def.ngrok-free.dev", ("abc-def.ngrok-free.dev", 443, True)),
+    ("abc-def.ngrok-free.dev:8765", ("abc-def.ngrok-free.dev", 443, True)),
+    ("https://abc-def.ngrok-free.dev:8765", ("abc-def.ngrok-free.dev", 443, True)),
+    ("http://abc-def.ngrok-free.dev:8765", ("abc-def.ngrok-free.dev", 443, True)),
+    ("http://abc-def.ngrok-free.dev", ("abc-def.ngrok-free.dev", 443, True)),
+    ("https://tunnel.example.com", ("tunnel.example.com", 443, True)),
+    ("https://tunnel.example.com:8765", ("tunnel.example.com", 443, True)),
+    ("http://tunnel.example.com:8765", ("tunnel.example.com", 80, False)),
+    ("http://tunnel.example.com", ("tunnel.example.com", 80, False)),
+    ("tunnel.example.com", ("tunnel.example.com", 443, True)),
+    ("tunnel.example.com:8765", ("tunnel.example.com", 443, True)),
+    ("https://tunnel.example.com:8443", ("tunnel.example.com", 8443, True)),
 ])
 def test_parse_follow(text, expected):
     assert parse_follow(text, 8765) == expected
